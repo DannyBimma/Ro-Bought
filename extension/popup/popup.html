@@ -1,0 +1,57 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Ro-Bought</title>
+  <link rel="stylesheet" href="../shared/ui.css">
+  <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+  <header>
+    <img src="../icons/icon32.png" width="20" height="20" alt="">
+    <h1>Ro-Bought</h1>
+    <span id="statusPill" class="pill">…</span>
+  </header>
+
+  <div id="ticketBlock" class="notice danger" hidden></div>
+
+  <section id="summary" class="card">
+    <div id="noConfig" hidden>
+      <p>No product configured yet.</p>
+    </div>
+    <div id="configSummary" hidden>
+      <div class="kv"><span class="muted">Product</span><span id="sumProduct"></span></div>
+      <div class="kv"><span class="muted">Site</span><span id="sumHost"></span></div>
+      <div class="kv"><span class="muted">Trigger</span><span id="sumTrigger"></span></div>
+      <div class="kv"><span class="muted">Final click</span><span id="sumFinal"></span></div>
+    </div>
+    <p id="configError" class="notice danger small" hidden></p>
+  </section>
+
+  <p id="message" class="small"></p>
+  <p id="error" class="notice danger small" role="alert" hidden></p>
+
+  <div class="buttons">
+    <button id="arm" class="primary">Arm</button>
+    <button id="disarm" class="danger" hidden>Disarm (stop now)</button>
+    <button id="reset" hidden>Reset for a new run</button>
+    <button id="options">Options</button>
+  </div>
+
+  <p class="notice small" id="foregroundNotice">
+    Keep Chrome open and the retailer tab in the foreground during the drop. The bot pauses and
+    hands control to you if a CAPTCHA or queue appears.
+  </p>
+
+  <details id="activity">
+    <summary class="small">Activity</summary>
+    <ol id="events" class="small"></ol>
+  </details>
+
+  <script src="../shared/namespace.js"></script>
+  <script src="../shared/constants.js"></script>
+  <script src="../shared/url-utils.js"></script>
+  <script src="../shared/ticket-guard.js"></script>
+  <script src="popup.js"></script>
+</body>
+</html>

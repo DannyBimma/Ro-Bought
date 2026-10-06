@@ -1,0 +1,7 @@
+main {
+  max-width: 720px;
+  margin: 0 auto;
+  padding: 32px 16px 64px;
+}
+header { margin-bottom: 16px; }
+.actions { display: flex; gap: 12px; align-items: center; margin-top: 8px; }

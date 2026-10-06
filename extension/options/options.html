@@ -1,0 +1,128 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Ro-Bought — Options</title>
+  <link rel="stylesheet" href="../shared/ui.css">
+  <link rel="stylesheet" href="options.css">
+</head>
+<body>
+  <main>
+    <header>
+      <h1>Ro-Bought</h1>
+      <p class="muted">One retailer, one product, one unit, once. Your account, your checkout. The bot just clicks faster.</p>
+    </header>
+
+    <div class="notice">
+      <strong>Before a drop:</strong> leave Chrome open with the retailer tab <em>in the foreground</em>,
+      keep your computer awake and plugged in, and stay signed in to the retailer with a saved
+      address and payment method. Extensions can't run while Chrome is closed or the machine is asleep,
+      and they can't read Chrome's saved cards.
+    </div>
+
+    <div id="locked" class="notice danger" hidden>
+      A run is active. Disarm it from the toolbar popup before changing settings.
+    </div>
+
+    <form id="form" novalidate>
+      <section class="card">
+        <h2>Product</h2>
+        <div class="field">
+          <label for="productUrl">Product page URL</label>
+          <input id="productUrl" name="productUrl" type="url" required placeholder="https://www.example-store.com/product/123" autocomplete="off" spellcheck="false">
+          <div class="hint">Full https:// link to the single product page. Event tickets are not supported.</div>
+        </div>
+        <div class="field">
+          <label for="productName">Product name <span class="muted">(optional)</span></label>
+          <input id="productName" name="productName" type="text" maxlength="200" placeholder="e.g. Console X 1TB Edition" autocomplete="off">
+          <div class="hint">Used for notifications and (later) Google Alerts.</div>
+        </div>
+        <div class="field">
+          <label for="retailer">Retailer adapter</label>
+          <select id="retailer" name="retailer">
+            <option value="generic">Generic (you pick the buttons, in Phase 4)</option>
+          </select>
+        </div>
+      </section>
+
+      <section class="card">
+        <h2>Trigger</h2>
+        <div class="field">
+          <label class="check"><input type="radio" name="triggerMode" value="scheduled"> Scheduled drop (I know the date and time)</label>
+          <label class="check"><input type="radio" name="triggerMode" value="restock"> Restock watch (time unknown)</label>
+        </div>
+
+        <div id="scheduledFields">
+          <div class="row">
+            <div class="field">
+              <label for="dropTime">Drop date and time</label>
+              <input id="dropTime" name="dropTime" type="datetime-local" step="1">
+              <div class="hint" id="dropTimeHint"></div>
+            </div>
+            <div class="field">
+              <label for="fireOffsetMs">Fire offset (ms)</label>
+              <input id="fireOffsetMs" name="fireOffsetMs" type="number" step="1">
+              <div class="hint">Negative fires early, positive fires late. 0 is usually right.</div>
+            </div>
+          </div>
+          <div class="row">
+            <div class="field">
+              <label for="burstIntervalSec">Retry interval after the drop (s)</label>
+              <input id="burstIntervalSec" name="burstIntervalSec" type="number" step="1">
+            </div>
+            <div class="field">
+              <label for="burstWindowSec">Retry window after the drop (s)</label>
+              <input id="burstWindowSec" name="burstWindowSec" type="number" step="1">
+              <div class="hint">After this, it falls back to the restock interval.</div>
+            </div>
+          </div>
+        </div>
+
+        <div class="row">
+          <div class="field">
+            <label for="restockIntervalSec">Restock check interval (s)</label>
+            <input id="restockIntervalSec" name="restockIntervalSec" type="number" step="1">
+          </div>
+          <div class="field">
+            <label for="jitterPct">Jitter (±%)</label>
+            <input id="jitterPct" name="jitterPct" type="number" step="1">
+          </div>
+        </div>
+        <p class="hint small muted" id="limitsHint"></p>
+      </section>
+
+      <section class="card">
+        <h2>Purchase</h2>
+        <div class="field">
+          <label class="check">
+            <input id="stopBeforePlaceOrder" name="stopBeforePlaceOrder" type="checkbox">
+            <span>Stop one click short: take me to the final "Place order" button and let me click it.</span>
+          </label>
+        </div>
+        <div class="field">
+          <label for="maxTotalPrice">Max order total</label>
+          <input id="maxTotalPrice" name="maxTotalPrice" type="number" min="0" step="0.01" placeholder="e.g. 549.99">
+          <div class="hint">In the store's currency. The bot stops if the total is higher. Required if the bot places the order.</div>
+        </div>
+      </section>
+
+      <div id="formErrors" class="notice danger" role="alert" hidden></div>
+      <div id="formWarnings" class="notice" hidden></div>
+      <div id="saved" class="notice ok" role="status" hidden></div>
+
+      <div class="actions">
+        <button type="submit" class="primary" id="save">Save and grant site access</button>
+      </div>
+      <p class="small muted">Saving asks Chrome for access to <em>only</em> the retailer's site. Any previously granted retailer is revoked.</p>
+    </form>
+  </main>
+
+  <script src="../shared/namespace.js"></script>
+  <script src="../shared/constants.js"></script>
+  <script src="../shared/url-utils.js"></script>
+  <script src="../shared/ticket-guard.js"></script>
+  <script src="../shared/config.js"></script>
+  <script src="options.js"></script>
+</body>
+</html>
