@@ -26,26 +26,37 @@
     return url;
   }
 
-  /**
-   * Chrome match pattern covering the product's origin (any port, any path).
-   * Chrome match patterns cannot carry a port, so localhost:8080 becomes http://localhost/*.
-   */
-  function originPattern(url) {
-    const u = url instanceof URL ? url : parseProductUrl(url);
-    if (!u) return null;
-    return `${u.protocol}//${u.hostname}/*`;
+  const IPV4 = /^\d{1,3}(?:\.\d{1,3}){3}$/;
+
+  /** Hostname without a leading "www." — amazon.com and www.amazon.com are one store. */
+  function baseHost(hostname) {
+    return String(hostname).toLowerCase().replace(/\.$/, '').replace(/^www\./, '');
   }
 
-  /** True when both URLs share scheme + hostname (port ignored, matching originPattern). */
-  function sameHost(a, b) {
+  /**
+   * Chrome match patterns for the retailer's site: the bare host plus its www. variant
+   * (any port, any path). Nothing broader — other subdomains are out of scope.
+   * Chrome match patterns cannot carry a port, so localhost:8080 becomes http://localhost/*.
+   * @returns {string[]} empty if the URL is invalid
+   */
+  function scopePatterns(url) {
+    const u = url instanceof URL ? url : parseProductUrl(url);
+    if (!u) return [];
+    const base = baseHost(u.hostname);
+    if (LOCAL_HOSTS.has(base) || IPV4.test(base)) return [`${u.protocol}//${base}/*`];
+    return [`${u.protocol}//${base}/*`, `${u.protocol}//www.${base}/*`];
+  }
+
+  /** True when `candidate` is on the same retailer site as `productUrl` (see scopePatterns). */
+  function inScope(candidate, productUrl) {
     try {
-      const ua = a instanceof URL ? a : new URL(a);
-      const ub = b instanceof URL ? b : new URL(b);
-      return ua.protocol === ub.protocol && ua.hostname === ub.hostname;
+      const c = candidate instanceof URL ? candidate : new URL(candidate);
+      const p = productUrl instanceof URL ? productUrl : new URL(productUrl);
+      return c.protocol === p.protocol && baseHost(c.hostname) === baseHost(p.hostname);
     } catch {
       return false;
     }
   }
 
-  RoBought.url = Object.freeze({ parseProductUrl, originPattern, sameHost });
+  RoBought.url = Object.freeze({ parseProductUrl, scopePatterns, inScope, baseHost });
 })();

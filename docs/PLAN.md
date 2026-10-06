@@ -47,12 +47,15 @@ Precise-fire algorithm (Phase 3):
 - Required: `storage`, `alarms`, `notifications`, `scripting`, `activeTab`, `power`,
   `offscreen` (offscreen is added in Phase 5).
 - **No blanket host access.** `optional_host_permissions` declares `https://*/*`, but the
-  extension asks only for the **configured retailer's origin**, at the moment the user
-  saves the options. It removes the old origin when the retailer changes.
+  extension asks only for the **configured retailer's site**, at the moment the user saves
+  the options. "Site" means the bare host plus its `www.` variant (`amazon.com` +
+  `www.amazon.com`) and nothing broader. It removes the old site's access when the retailer
+  changes.
 - Content scripts are registered **dynamically** (`chrome.scripting.registerContentScripts`)
-  for that one origin, so the extension runs nowhere else.
-- No `tabs` permission. Host permission for the retailer origin is enough to find and focus
-  its tab, and `activeTab` is enough for the popup's ticket-site check.
+  for that one site, so the extension runs nowhere else.
+- No `tabs` permission. Host permission for the retailer is enough to find and focus its tab.
+  When the tab leaves the retailer, Chrome hides its URL from us, and that alone tells us it's
+  off-site. `activeTab` is enough for the popup's ticket-site check.
 - No remote code, no `eval`, and the default MV3 CSP.
 
 ### 1.3 State and the once-only guarantee
@@ -76,8 +79,11 @@ Precise-fire algorithm (Phase 3):
 | --- | --- |
 | Ticket sites | Hard blocklist of major ticket brands, plus any hostname label containing `ticket`. These are refused in options, when arming, in the popup ("disabled on ticket sites") and again at runtime in the content script. |
 | Ticket products | Refused if the product URL, the name, or the page's structured data (`schema.org` `Event`, `og:type=event`, ticket keywords) indicates a ticket. The user is told why. |
-| CAPTCHA / bot challenge | Detects reCAPTCHA, hCaptcha, Turnstile, Arkose/FunCaptcha, PerimeterX (“press & hold”), DataDome, and generic challenge pages. The bot **pauses**, focuses the tab, sends a notification, plays a sound, and **never interacts with the challenge**. |
-| Queue / waiting room | Detects Queue-it, Cloudflare waiting room and retailer "please wait" queues. Same response: pause and hand back to the user. |
+| CAPTCHA / bot challenge | Detects reCAPTCHA, hCaptcha, Turnstile and Cloudflare interstitials, Arkose/FunCaptcha, PerimeterX ("press & hold"), DataDome, AWS WAF, Amazon's "type the characters" page, Akamai, Imperva, GeeTest, and generic "verify you are human" pages. Only **visible** widgets count, so the invisible reCAPTCHA badge doesn't trip it. The bot **pauses**, focuses the tab, sends a notification (a sound arrives in Phase 5), and **never interacts with the challenge**. |
+| Queue / waiting room | Detects waiting-room and "you are in line" pages, and Amazon invitation-only items. Queue-it and similar services live on another site, which counts as leaving the retailer. Same response: pause and hand back to the user. |
+| Sign-in / card details | A visible password or one-time-code field, Amazon's `/ap/` sign-in and verification pages, card-number/CVV fields and 3-D Secure frames all pause the run. The bot never types credentials or card data. |
+| Leaving the site | If the run tab navigates off the retailer (queue, `accounts.nintendo.com`, PayPal, …), is closed, or is discarded, the run pauses. Coming back marks it "looks clear"; the user still decides when to resume. |
+| Resume | **Resume** after a check clears. **Resume anyway** while it's still showing records that exact check (kind + rule + page) so it doesn't immediately re-pause. Any other check still pauses. |
 | Fingerprinting | The extension never spoofs or changes the user agent, headers, fingerprint, or IP. It sends no proxy traffic. |
 | One buyer | One configured product, one tab, one account (the one in the browser), one unit. |
 | Polite network | Restock polling defaults to 45 s with ±20 % jitter, and the floor is 20 s. Exponential backoff on 429/503 honours `Retry-After`. The burst window is capped (≥2 s spacing, ≤10 min). |
@@ -91,7 +97,9 @@ it can:
 
 - `chrome.power.requestKeepAwake('display')` while armed, released on disarm or completion.
 - Sets `autoDiscardable: false` on the retailer tab so Memory Saver can't discard it.
-- A banner whenever the retailer tab is hidden or unfocused (`visibilitychange`).
+- A notification when the retailer tab goes into the background (`visibilitychange`, at most
+  once a minute), plus a watchdog alarm that warns if the tab goes quiet (for example, the
+  machine slept).
 - Google Alerts plus a calendar reminder so the user is at the machine for the drop (Phase 5).
 
 ### 1.6 Retailer adapters
@@ -105,8 +113,8 @@ Retailer page markup changes often, so hard-coded selectors break. The design:
   selector is saved. No coding needed.
 - Availability is read from `schema.org` JSON-LD `offers.availability` first, then from the
   configured add-to-cart button state.
-- Optional **presets** for specific retailers can ship best-effort default selectors, which
-  the user can override.
+- **Presets for Amazon and Nintendo** ship best-effort default selectors, which the user can
+  override with the picker. Every other store uses the generic adapter.
 - Each step waits with a `MutationObserver` and a timeout. Every observer and timer is
   disconnected or cleared when it settles.
 
@@ -116,7 +124,7 @@ Retailer page markup changes often, so hard-coded selectors break. The design:
 
 Each phase ends with a pause so you can review, change, and commit.
 
-### Phase 1 — Scaffold, config, and safety core ✅ (this commit)
+### Phase 1 — Scaffold, config, and safety core ✅
 - `manifest.json` (MV3, least privilege, optional host permissions), icons.
 - Shared classic-script modules under one `RoBought` namespace: constants, URL
   utilities, ticket guard, config schema/validation.
@@ -130,14 +138,20 @@ Each phase ends with a pause so you can review, change, and commit.
 - Content-script stub (handshake only).
 - Node unit tests (`node --test`, zero deps) for the guard and the validation.
 
-### Phase 2 — Content runtime and page guards
-- Content bootstrap: page-level ticket detection (JSON-LD, OG, keywords), runtime
-  ticket-domain recheck.
-- Anti-bot detector (CAPTCHA, challenge and queue). Pause, hand back, notify, observe
-  until cleared, then let the user resume.
-- Visibility/focus banner (a shadow-DOM overlay, so page CSS can't interfere and page scripts
-  can't read it through the light DOM).
-- Heartbeat, plus a service-worker watchdog alarm that alerts if the tab is closed or stalls.
+### Phase 2 — Content runtime and page guards ✅ (this commit)
+- Site scope widened from one exact host to bare host + `www.` (Amazon redirects between them).
+- Content runtime: handshake, page-level ticket detection (JSON-LD walked with a node budget,
+  `og:type`, title/heading), and a guard detector (`content/guards.js`) re-run by a debounced
+  `MutationObserver` while armed. Only the run's tab acts; other tabs on the same site stay dormant.
+- Pause / clear / Resume / Resume-anyway in the service worker, plus pauses for leaving the site,
+  a closed tab or a discarded tab. Resume reopens or reloads the tab when needed.
+- In-page status panel in a **closed** shadow root. Its buttons ignore synthetic clicks.
+- Heartbeat and visibility reports, a 1-minute watchdog alarm (only while armed), and
+  notification cooldowns.
+- Cleanup: observer, timers and listeners are released when the run stops, and the content script
+  tears itself down if the extension is reloaded.
+- Test harness pulled forward from Phase 3: `tools/serve.mjs`, fixture pages in `tests/fixtures/`,
+  and `tests/e2e/run.mjs` (Chrome for Testing over CDP, zero dependencies).
 
 ### Phase 3 — Triggers
 - Scheduled drop: service-worker pre-warning alarm (T−2 min), server-clock offset
@@ -146,12 +160,15 @@ Each phase ends with a pause so you can review, change, and commit.
   with `DOMParser`. Interval plus jitter, 429/503 backoff with `Retry-After`, and an
   `AbortController` on every request.
 - Availability detection (JSON-LD, then the selector).
-- Local **mock store** (`test/mock-store/`, served by a tiny Node static server) so we can
-  rehearse without a real retailer.
+- Local **mock store** (`tests/fixtures/store/`, served by `tools/serve.mjs`) with stock that
+  can be toggled, so drops and restocks can be rehearsed without a real retailer.
 
 ### Phase 4 — Checkout engine
 - Generic selector adapter, "pick element" helper, stage machine across page loads
   (product → cart → checkout → review → confirmation).
+- **Amazon and Nintendo presets.** Amazon covers the add-to-cart and buy box, cart, and
+  checkout/place-order pages. Nintendo covers the store product page, cart and checkout.
+  Nintendo account sign-in is a hand-off.
 - Cart guards (quantity 1, no other items), saved address/payment present, price ceiling.
 - Stop-one-click-short (highlight the button, focus, notify) **or** claim the purchase lock,
   then place the order and verify the confirmation.

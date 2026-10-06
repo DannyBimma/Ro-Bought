@@ -135,23 +135,23 @@
 
   // ---- save ----
 
-  async function revokeOtherOrigins(keepPattern) {
+  async function revokeOtherOrigins(keepPatterns) {
     const { origins = [] } = await chrome.permissions.getAll();
-    const stale = origins.filter((o) => o !== keepPattern);
+    const stale = origins.filter((o) => !keepPatterns.includes(o));
     if (stale.length) await chrome.permissions.remove({ origins: stale });
   }
 
-  async function persist(result, pattern) {
+  async function persist(result, patterns) {
     const { [STORAGE_KEYS.RUN_STATE]: state } = await chrome.storage.local.get(STORAGE_KEYS.RUN_STATE);
     if (state && ACTIVE_STATUSES.includes(state.status)) {
       showBanner('formErrors', ['A run is active. Disarm it before changing settings.']);
       return;
     }
     await chrome.storage.local.set({ [STORAGE_KEYS.CONFIG]: result.config });
-    await revokeOtherOrigins(pattern);
+    await revokeOtherOrigins(patterns);
     const reg = await chrome.runtime.sendMessage({ type: MESSAGES.CONFIG_SAVED });
 
-    const host = new URL(result.config.productUrl).hostname;
+    const host = RoBought.url.baseHost(new URL(result.config.productUrl).hostname);
     const lines = [`Saved. Ro-Bought can now run on ${host} only.`];
     if (reg && reg.ok === false) lines.push(`Note: ${reg.error}`);
     else if (reg && !reg.registered && reg.reason) lines.push(`Note: ${reg.reason}`);
@@ -170,12 +170,13 @@
       showErrors(result.errors);
       return;
     }
-    const pattern = RoBought.url.originPattern(result.config.productUrl);
+    // The retailer's site: bare host + www. variant (e.g. amazon.com and www.amazon.com).
+    const patterns = RoBought.url.scopePatterns(result.config.productUrl);
 
     // permissions.request must run synchronously inside the user gesture, so it is the
     // first async call in this handler.
     chrome.permissions
-      .request({ origins: [pattern] })
+      .request({ origins: patterns })
       .then((granted) => {
         if (!granted) {
           showBanner('formErrors', [
@@ -183,7 +184,7 @@
           ]);
           return undefined;
         }
-        return persist(result, pattern);
+        return persist(result, patterns);
       })
       .catch((e) => showBanner('formErrors', [`Could not save: ${e.message}`]));
   });

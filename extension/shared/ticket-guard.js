@@ -88,5 +88,43 @@
     return null;
   }
 
-  RoBought.ticketGuard = Object.freeze({ checkHost, checkUrl, checkText });
+  // schema.org Event subtypes that are sold as admission, plus Ticket itself.
+  // SaleEvent, DeliveryEvent, PublicationEvent and CourseInstance are not admission, so they're omitted.
+  const TICKET_SCHEMA_TYPES = new Set([
+    'Event', 'EventSeries', 'BusinessEvent', 'ChildrensEvent', 'ComedyEvent', 'DanceEvent',
+    'EducationEvent', 'ExhibitionEvent', 'Festival', 'FoodEvent', 'Hackathon', 'LiteraryEvent',
+    'MusicEvent', 'ScreeningEvent', 'SocialEvent', 'SportsEvent', 'TheaterEvent',
+    'VisualArtsEvent', 'Ticket',
+  ]);
+  const JSONLD_NODE_LIMIT = 5000;
+
+  /**
+   * Walks parsed JSON-LD (iteratively, with a node budget, so hostile or huge
+   * documents can't blow the stack or stall the page).
+   * @returns {string|null} reason if any node is typed as an event or ticket
+   */
+  function checkJsonLd(root) {
+    const stack = [root];
+    let visited = 0;
+    while (stack.length && visited < JSONLD_NODE_LIMIT) {
+      const node = stack.pop();
+      visited++;
+      if (!node || typeof node !== 'object') continue;
+      if (!Array.isArray(node)) {
+        const types = Array.isArray(node['@type']) ? node['@type'] : [node['@type']];
+        for (const t of types) {
+          // Accept "MusicEvent", "schema:MusicEvent" and "https://schema.org/MusicEvent".
+          if (typeof t === 'string' && TICKET_SCHEMA_TYPES.has(t.replace(/^.*[/#:]/, ''))) {
+            return 'This page is marked up as an event or ticket listing.';
+          }
+        }
+      }
+      for (const v of Object.values(node)) {
+        if (v && typeof v === 'object') stack.push(v);
+      }
+    }
+    return null;
+  }
+
+  RoBought.ticketGuard = Object.freeze({ checkHost, checkUrl, checkText, checkJsonLd });
 })();

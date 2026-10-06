@@ -4,7 +4,7 @@ const assert = require('node:assert/strict');
 const RoBought = require('./load-shared');
 
 const { validate, armProblems, defaults } = RoBought.config;
-const { parseProductUrl, originPattern, sameHost } = RoBought.url;
+const { parseProductUrl, scopePatterns, inScope } = RoBought.url;
 
 const valid = (over = {}) => ({
   productUrl: 'https://www.example-store.com/product/123',
@@ -27,11 +27,22 @@ test('rejects http (non-localhost), credentials and garbage URLs; allows localho
   assert.ok(parseProductUrl('http://localhost:8080/product'));
 });
 
-test('origin pattern drops port and path', () => {
-  assert.equal(originPattern('https://www.example.com/a/b?c=1'), 'https://www.example.com/*');
-  assert.equal(originPattern('http://localhost:8080/p'), 'http://localhost/*');
-  assert.ok(sameHost('https://www.example.com/x', 'https://www.example.com/y'));
-  assert.ok(!sameHost('https://www.example.com/x', 'https://evil.example.net/x'));
+test('site scope covers bare host + www (port and path ignored), nothing broader', () => {
+  assert.deepEqual(scopePatterns('https://www.amazon.com/dp/B0TEST?x=1'),
+    ['https://amazon.com/*', 'https://www.amazon.com/*']);
+  assert.deepEqual(scopePatterns('https://amazon.com/dp/B0TEST'),
+    ['https://amazon.com/*', 'https://www.amazon.com/*']);
+  assert.deepEqual(scopePatterns('https://store.nintendo.co.uk/en_GB/p'),
+    ['https://store.nintendo.co.uk/*', 'https://www.store.nintendo.co.uk/*']);
+  assert.deepEqual(scopePatterns('http://localhost:8080/p'), ['http://localhost/*']);
+  assert.deepEqual(scopePatterns('not a url'), []);
+
+  assert.ok(inScope('https://amazon.com/gp/cart', 'https://www.amazon.com/dp/B0TEST'));
+  assert.ok(inScope('https://www.amazon.com/x', 'https://www.amazon.com/y'));
+  assert.ok(!inScope('https://smile.amazon.com/x', 'https://www.amazon.com/y'));
+  assert.ok(!inScope('https://accounts.nintendo.com/login', 'https://www.nintendo.com/us/store/p'));
+  assert.ok(!inScope('http://www.amazon.com/x', 'https://www.amazon.com/y'));
+  assert.ok(!inScope('https://evil.example.net/x', 'https://www.example.com/x'));
 });
 
 test('refuses ticket URLs and ticket product names', () => {

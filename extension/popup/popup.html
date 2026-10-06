@@ -28,10 +28,17 @@
     <p id="configError" class="notice danger small" hidden></p>
   </section>
 
+  <div id="pauseBox" class="notice danger small" role="alert" hidden>
+    <strong id="pauseTitle"></strong>
+    <p id="pauseLabel"></p>
+    <p id="pauseHint" class="muted"></p>
+  </div>
+
   <p id="message" class="small"></p>
   <p id="error" class="notice danger small" role="alert" hidden></p>
 
   <div class="buttons">
+    <button id="resume" class="primary" hidden>Resume</button>
     <button id="arm" class="primary">Arm</button>
     <button id="disarm" class="danger" hidden>Disarm (stop now)</button>
     <button id="reset" hidden>Reset for a new run</button>

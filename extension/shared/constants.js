@@ -14,17 +14,45 @@
     STORAGE_KEYS: {
       CONFIG: 'config',
       RUN_STATE: 'runState',
+      // chrome.storage.session (service worker only — never exposed to content scripts)
+      PRESENCE: 'presence',
+      NOTICES: 'notices',
     },
 
     CONTENT_SCRIPT_ID: 'robought-retailer',
-    // Classic scripts injected (in order) into the configured retailer origin only.
+    // Classic scripts injected (in order) into the configured retailer site only.
     CONTENT_SCRIPT_FILES: [
       'shared/namespace.js',
       'shared/constants.js',
       'shared/url-utils.js',
       'shared/ticket-guard.js',
+      'content/dom.js',
+      'content/guards.js',
+      'content/overlay.js',
       'content/main.js',
     ],
+
+    WATCHDOG_ALARM: 'robought-watchdog',
+    HEARTBEAT_MS: 30_000,
+    STALE_AFTER_MS: 100_000,
+    HIDDEN_NOTICE_COOLDOWN_MS: 60_000,
+    STALE_NOTICE_COOLDOWN_MS: 300_000,
+
+    // Why a run can pause. Content-detected kinds are re-checked continuously on the page;
+    // tab-level kinds are detected by the service worker from tab events.
+    CONTENT_GUARD_KINDS: ['captcha', 'challenge', 'queue', 'signin', 'payment', 'blocked'],
+    TAB_GUARD_KINDS: ['offsite', 'tab_closed', 'discarded'],
+    PAUSE_HINTS: {
+      captcha: 'Ro-Bought never solves CAPTCHAs. Complete it yourself, then click Resume.',
+      challenge: 'Ro-Bought never bypasses bot checks. Complete it yourself, then click Resume.',
+      queue: 'Ro-Bought never skips queues. Wait your turn in this tab, then click Resume.',
+      signin: 'Ro-Bought never enters passwords or codes. Sign in yourself, then click Resume.',
+      payment: 'Ro-Bought never enters card details. Fill this in yourself, then click Resume (or finish the order by hand).',
+      blocked: 'The retailer blocked this request. Ro-Bought will not try to get around it.',
+      offsite: 'Usually a queue, a sign-in page or a payment step on another site. Handle it, then click Resume.',
+      tab_closed: 'Click Resume to reopen the retailer tab.',
+      discarded: 'Chrome unloaded the tab to save memory. Click Resume to reload it.',
+    },
 
     TRIGGER_MODES: ['scheduled', 'restock'],
 
@@ -39,6 +67,20 @@
       COMPLETED: 'completed',       // order placed (or lock claimed) — terminal
       ABORTED: 'aborted',           // a guard stopped the run — terminal
       ERROR: 'error',               // unexpected failure — terminal
+    },
+
+    // [label, tone] for the popup pill and the in-page panel.
+    STATUS_LABELS: {
+      idle: ['Off', ''],
+      armed: ['Armed', 'on'],
+      waiting: ['Waiting', 'on'],
+      watching: ['Watching', 'on'],
+      executing: ['Buying', 'warn'],
+      paused: ['Your turn', 'bad'],
+      awaiting_user: ['Your click', 'warn'],
+      completed: ['Done', 'on'],
+      aborted: ['Stopped', ''],
+      error: ['Error', 'bad'],
     },
 
     // Statuses that require an explicit user "Reset" before the bot can run again.
@@ -75,13 +117,15 @@
       // popup / options -> service worker
       GET_STATUS: 'GET_STATUS',
       ARM: 'ARM',
-      DISARM: 'DISARM',
       RESET: 'RESET',
       CONFIG_SAVED: 'CONFIG_SAVED',
-      // content -> service worker
+      // popup / options / in-page panel -> service worker
+      DISARM: 'DISARM',
+      RESUME: 'RESUME',
+      // content -> service worker (content learns about state changes via storage.onChanged)
       CONTENT_HELLO: 'CONTENT_HELLO',
-      // service worker -> content
-      RUN_STATE_CHANGED: 'RUN_STATE_CHANGED',
+      GUARD_STATUS: 'GUARD_STATUS',
+      PRESENCE: 'PRESENCE',
     },
   });
 })();

@@ -1,21 +1,11 @@
 (() => {
   'use strict';
 
-  const { STORAGE_KEYS, MESSAGES, RUN_STATUS, ACTIVE_STATUSES, TERMINAL_STATUSES } = RoBought.constants;
+  const {
+    STORAGE_KEYS, MESSAGES, RUN_STATUS, ACTIVE_STATUSES, TERMINAL_STATUSES, STATUS_LABELS, PAUSE_HINTS,
+    CONTENT_GUARD_KINDS,
+  } = RoBought.constants;
   const $ = (id) => document.getElementById(id);
-
-  const STATUS_LABEL = {
-    [RUN_STATUS.IDLE]: ['Off', ''],
-    [RUN_STATUS.ARMED]: ['Armed', 'on'],
-    [RUN_STATUS.WAITING]: ['Waiting', 'on'],
-    [RUN_STATUS.WATCHING]: ['Watching', 'on'],
-    [RUN_STATUS.EXECUTING]: ['Buying', 'warn'],
-    [RUN_STATUS.PAUSED]: ['Your turn', 'bad'],
-    [RUN_STATUS.AWAITING_USER]: ['Your click', 'warn'],
-    [RUN_STATUS.COMPLETED]: ['Done', 'on'],
-    [RUN_STATUS.ABORTED]: ['Stopped', ''],
-    [RUN_STATUS.ERROR]: ['Error', 'bad'],
-  };
 
   let ticketReason = null;
 
@@ -29,7 +19,7 @@
   }
 
   function render({ state, config, configValid, configErrors }) {
-    const [label, tone] = STATUS_LABEL[state.status] || [state.status, ''];
+    const [label, tone] = STATUS_LABELS[state.status] || [state.status, ''];
     $('statusPill').textContent = label;
     $('statusPill').dataset.tone = tone;
 
@@ -47,7 +37,19 @@
     $('configError').textContent = cfgErr;
     $('configError').hidden = !cfgErr;
 
-    $('message').textContent = state.message || '';
+    const paused = state.status === RUN_STATUS.PAUSED;
+    const pause = paused ? state.pause || {} : null;
+    $('pauseBox').hidden = !paused;
+    $('resume').hidden = !paused;
+    if (paused) {
+      $('pauseTitle').textContent = pause.cleared ? 'Looks clear — your call' : 'Paused — your turn';
+      $('pauseLabel').textContent = pause.label || '';
+      $('pauseHint').textContent = pause.cleared ? 'Click Resume when you are ready.' : PAUSE_HINTS[pause.kind] || '';
+      // "anyway" only when overriding an on-page check that is still showing.
+      const anyway = !pause.cleared && CONTENT_GUARD_KINDS.includes(pause.kind);
+      $('resume').textContent = anyway ? 'Resume anyway' : 'Resume';
+    }
+    $('message').textContent = paused ? '' : state.message || '';
 
     const active = ACTIVE_STATUSES.includes(state.status);
     const terminal = TERMINAL_STATUSES.includes(state.status);
@@ -109,6 +111,7 @@
   }
 
   $('arm').addEventListener('click', () => command(MESSAGES.ARM));
+  $('resume').addEventListener('click', () => command(MESSAGES.RESUME));
   $('disarm').addEventListener('click', () => command(MESSAGES.DISARM));
   $('reset').addEventListener('click', () => command(MESSAGES.RESET));
   $('options').addEventListener('click', () => chrome.runtime.openOptionsPage());

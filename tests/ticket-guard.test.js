@@ -3,7 +3,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const RoBought = require('./load-shared');
 
-const { checkHost, checkUrl, checkText } = RoBought.ticketGuard;
+const { checkHost, checkUrl, checkText, checkJsonLd } = RoBought.ticketGuard;
 
 test('blocks major ticket sites, including country domains and subdomains', () => {
   for (const host of [
@@ -44,4 +44,24 @@ test('detects ticket product names without catching games or merch', () => {
   assert.equal(checkText('Graco Car Seat'), null);
   assert.equal(checkText('Console X 1TB Edition'), null);
   assert.equal(checkText(''), null);
+});
+
+test('detects event/ticket structured data, ignores products and sales', () => {
+  assert.ok(checkJsonLd({ '@context': 'https://schema.org', '@type': 'MusicEvent', name: 'Arena Tour' }));
+  assert.ok(checkJsonLd({ '@graph': [{ '@type': 'WebPage' }, { '@type': ['Thing', 'SportsEvent'] }] }));
+  assert.ok(checkJsonLd([{ '@type': 'Product', offers: { itemOffered: { '@type': 'https://schema.org/TheaterEvent' } } }]));
+  assert.ok(checkJsonLd({ '@type': 'schema:Ticket' }));
+  assert.equal(checkJsonLd({ '@type': 'Product', name: 'Console X', offers: { '@type': 'Offer', availability: 'InStock' } }), null);
+  assert.equal(checkJsonLd({ '@type': 'SaleEvent', name: 'Prime Day' }), null);
+  assert.equal(checkJsonLd(null), null);
+});
+
+test('JSON-LD walk is bounded on huge or deeply nested input', () => {
+  let deep = { '@type': 'MusicEvent' };
+  for (let i = 0; i < 100_000; i++) deep = { child: deep };
+  assert.equal(checkJsonLd(deep), null); // event is beyond the node budget: no stack overflow, no hang
+  const wide = { items: Array.from({ length: 50_000 }, () => ({ '@type': 'Product' })) };
+  const started = Date.now();
+  assert.equal(checkJsonLd(wide), null);
+  assert.ok(Date.now() - started < 500);
 });
