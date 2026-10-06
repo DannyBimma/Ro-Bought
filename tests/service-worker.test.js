@@ -43,7 +43,7 @@ async function saveConfig(over = {}) {
 
 async function armFresh() {
   if (['completed', 'aborted', 'error'].includes(runState()?.status)) await send(MESSAGES.RESET);
-  if (['paused', 'watching', 'waiting', 'awaiting_user'].includes(runState()?.status)) await send(MESSAGES.DISARM);
+  if (['paused', 'watching', 'waiting', 'executing', 'awaiting_user'].includes(runState()?.status)) await send(MESSAGES.DISARM);
   const res = await send(MESSAGES.ARM);
   assert.deepEqual(res, { ok: true });
   await settle();
@@ -392,24 +392,18 @@ test('DROP_FIRED moves waiting -> watching with a burst window, once', async () 
   assert.match((await send(MESSAGES.DROP_FIRED, content(runTab()))).error, /Not waiting/);
 });
 
-test('AVAILABLE hands the purchase to the user; guards and nags then stand down', async () => {
+test('AVAILABLE starts the checkout (executing) and brings the tab forward', async () => {
   fake.calls.focused.length = 0;
   const res = await send(MESSAGES.AVAILABLE, content(runTab()), { detail: 'Structured data says in stock', price: 499.99, source: 'json-ld' });
   assert.deepEqual(res, { ok: true });
   await settle();
-  assert.equal(runState().status, 'awaiting_user');
-  assert.match(runState().message, /499\.99/);
-  assert.equal(notified('available').at(-1).requireInteraction, true);
+  const s = runState();
+  assert.equal(s.status, 'executing');
+  assert.deepEqual(s.checkout.visits, {});
+  assert.match(s.message, /499\.99/);
+  assert.ok(notified('available').length);
   assert.ok(fake.calls.focused.includes(runTab()));
-
-  // The user is checking out: their own password prompt must not pause anything.
-  await send(MESSAGES.GUARD_STATUS, content(runTab()), { guard: { kind: 'signin', label: 'Password', signature: 'signin:password:/' } });
-  assert.equal(runState().status, 'awaiting_user');
-  await fake.chrome.storage.session.set({ [STORAGE_KEYS.NOTICES]: {} });
-  const hidden = notified('hidden').length;
-  await send(MESSAGES.PRESENCE, content(runTab()), { visible: false });
-  assert.equal(notified('hidden').length, hidden);
-
+  assert.equal(fake.calls.badge.at(-1), 'GO');
   assert.match((await send(MESSAGES.AVAILABLE, content(runTab()), { detail: 'again' })).error, /Not watching/);
 });
 
@@ -443,4 +437,192 @@ test('disarming a scheduled run clears the pre-warning alarm', async () => {
   await send(MESSAGES.DISARM);
   await settle();
   assert.ok(!fake.alarms.has(PREWARN_ALARM));
+});
+
+// ---------------------------------------------------------------------------
+// Checkout (Phase 4)
+// ---------------------------------------------------------------------------
+
+async function startCheckout(over = {}) {
+  await saveConfig({ maxTotalPrice: 600, ...over });
+  await armFresh();
+  await send(MESSAGES.AVAILABLE, content(runTab()), { detail: 'in stock', price: 499.99 });
+  assert.equal(runState().status, 'executing');
+}
+const progress = (stage, extra = {}) => send(MESSAGES.CHECKOUT_PROGRESS, content(runTab()), { stage, ...extra });
+
+test('checkout progress tracks stages and stops a loop after 3 visits', async () => {
+  await startCheckout();
+  assert.deepEqual(await progress('product'), { ok: true });
+  assert.equal(runState().checkout.stage, 'product');
+  assert.match(runState().message, /adding it to the cart/);
+  await progress('product', { note: 'Clicked "Add to cart".', entered: false }); // a note, not a visit
+  assert.equal(runState().checkout.visits.product, 1);
+  await progress('product');
+  await progress('product');
+  const loop = await progress('product');
+  assert.equal(loop.ok, false);
+  assert.match(loop.error, /keeps landing on the product page/);
+  assert.match((await progress('nonsense')).error, /Unknown checkout stage/);
+});
+
+test('sold out again at add-to-cart goes back to watching', async () => {
+  await startCheckout();
+  const res = await progress('product', { soldOut: true, entered: false });
+  assert.equal(res.rewatch, true);
+  assert.equal(runState().status, 'watching');
+  assert.equal(runState().checkout, null);
+});
+
+test('a checkout that runs too long is refused', async () => {
+  await startCheckout();
+  const s = runState();
+  await fake.chrome.storage.local.set({ [STORAGE_KEYS.RUN_STATE]: { ...s, checkout: { ...s.checkout, startedAt: Date.now() - 6 * 60_000 } } });
+  assert.match((await progress('cart')).error, /taking too long/);
+});
+
+test('a stuck step pauses (kind "checkout"); page loads do not "clear" it; Resume retries fresh', async () => {
+  await startCheckout();
+  await progress('cart');
+  const res = await send(MESSAGES.CHECKOUT_HANDOFF, content(runTab()), { mode: 'pause', reason: "Couldn't find \"Proceed to checkout\"", stage: 'cart', path: '/cart' });
+  assert.deepEqual(res, { ok: true });
+  assert.equal(runState().status, 'paused');
+  assert.equal(runState().pause.kind, 'checkout');
+  assert.match(notified('paused').at(-1).message, /Do this step yourself/);
+  await send(MESSAGES.GUARD_STATUS, content(runTab()), { guard: null });
+  assert.equal(runState().pause.cleared, false);
+  await send(MESSAGES.RESUME);
+  assert.equal(runState().status, 'executing');
+  assert.deepEqual(runState().checkout.visits, {});
+  assert.equal(runState().ackSignature, null);
+});
+
+test('stop one click short: "ready" hand-off, then the user places the order -> completed', async () => {
+  await startCheckout(); // stopBeforePlaceOrder defaults to true
+  await progress('review');
+  assert.match((await send(MESSAGES.CLAIM_PURCHASE, content(runTab()), { total: 529.99 })).error, /Automatic purchase is off/);
+  assert.equal(runState().purchaseLock, null);
+
+  await send(MESSAGES.CHECKOUT_HANDOFF, content(runTab()), { mode: 'final', ready: true, reason: 'Ready: order total 529.99. Check it, then click "Place your order" to buy', stage: 'review' });
+  let s = runState();
+  assert.equal(s.status, 'awaiting_user');
+  assert.equal(s.checkout.ready, true);
+  assert.equal(notified('handoff').at(-1).title, 'Ready — your click');
+
+  // While the user is in control, a guard (their CVV prompt) does not pause.
+  await send(MESSAGES.GUARD_STATUS, content(runTab()), { guard: { kind: 'payment', label: 'CVV', signature: 'payment:card-entry:/review' } });
+  assert.equal(runState().status, 'awaiting_user');
+
+  assert.deepEqual(await send(MESSAGES.ORDER_PLACED, content(runTab()), { detail: 'Thank you' }), { ok: true });
+  await settle();
+  s = runState();
+  assert.equal(s.status, 'completed');
+  assert.match(s.message, /Order placed/);
+  assert.equal(fake.calls.keepAwake.at(-1), 'release');
+  assert.match((await send(MESSAGES.ARM)).error, /Reset for a new run/);
+});
+
+test('auto-purchase: the lock is granted once, only within the max price', async () => {
+  await send(MESSAGES.RESET);
+  await startCheckout({ stopBeforePlaceOrder: false, maxTotalPrice: 600 });
+  await progress('review');
+  const claim = (total) => send(MESSAGES.CLAIM_PURCHASE, content(runTab()), { total });
+  assert.match((await claim(700)).error, /not within your max/);
+  assert.match((await claim(null)).error, /not within your max/);
+  assert.equal(runState().purchaseLock, null);
+
+  assert.deepEqual(await claim(529.99), { ok: true });
+  assert.equal(runState().purchaseLock.total, 529.99);
+  assert.equal(runState().checkout.stage, 'placing');
+  assert.match((await claim(529.99)).error, /already clicked "Place order" once/);
+
+  assert.deepEqual(await send(MESSAGES.ORDER_PLACED, content(runTab()), { detail: 'Thank you' }), { ok: true });
+  assert.equal(runState().status, 'completed');
+  assert.match(runState().message, /529\.99/);
+});
+
+test('a confirmation page without the lock (while the bot is clicking) is not trusted', async () => {
+  await send(MESSAGES.RESET);
+  await startCheckout({ stopBeforePlaceOrder: false });
+  assert.match((await send(MESSAGES.ORDER_PLACED, content(runTab()), {})).error, /No purchase in progress/);
+  assert.equal(runState().status, 'executing');
+});
+
+test('disarming after "Place order" was clicked ends the run for good', async () => {
+  await send(MESSAGES.CLAIM_PURCHASE, content(runTab()), { total: 529.99 });
+  await send(MESSAGES.DISARM);
+  assert.equal(runState().status, 'aborted');
+  assert.match(runState().message, /check your orders/i);
+  assert.match((await send(MESSAGES.ARM)).error, /Reset for a new run/);
+});
+
+test('a Chrome restart after "Place order" was clicked also ends the run for good', async () => {
+  await send(MESSAGES.RESET);
+  await startCheckout({ stopBeforePlaceOrder: false });
+  await send(MESSAGES.CLAIM_PURCHASE, content(runTab()), { total: 100 });
+  await fake.chrome.runtime.onStartup.dispatch();
+  assert.equal(runState().status, 'aborted');
+  await send(MESSAGES.RESET);
+});
+
+test('only the run tab can claim the lock or report an order', async () => {
+  await startCheckout({ stopBeforePlaceOrder: false });
+  const other = await fake.chrome.tabs.create({ url: PRODUCT, active: false });
+  assert.match((await send(MESSAGES.CLAIM_PURCHASE, content(other.id), { total: 1 })).error, /Not the run tab/);
+  assert.match((await send(MESSAGES.ORDER_PLACED, content(other.id), {})).error, /Not the run tab/);
+  assert.equal(runState().purchaseLock, null);
+  await send(MESSAGES.DISARM);
+});
+
+// ---------------------------------------------------------------------------
+// Teach mode
+// ---------------------------------------------------------------------------
+
+test('teach: opens only on the store tab, and only while disarmed', async () => {
+  await fake.chrome.tabs.create({ url: 'https://news.example.org/', active: true });
+  fake.granted.add('https://news.example.org/*');
+  assert.match((await send(MESSAGES.TEACH_OPEN)).error, /Open example-store\.com in this tab first/);
+  fake.granted.delete('https://news.example.org/*');
+
+  const store = await fake.chrome.tabs.create({ url: `${PRODUCT}`, active: true });
+  assert.deepEqual(await send(MESSAGES.TEACH_OPEN), { ok: true });
+  const sent = fake.calls.tabMessages.at(-1);
+  assert.equal(sent.tabId, store.id);
+  assert.equal(sent.msg.type, MESSAGES.TEACH_OPEN);
+  assert.equal(sent.msg.config.productUrl, PRODUCT);
+
+  await armFresh();
+  assert.match((await send(MESSAGES.TEACH_OPEN)).error, /Disarm before teaching/);
+  assert.match((await send(MESSAGES.TEACH_SAVE, content(store.id), { field: 'placeOrder', selector: '#x', label: 'x' })).error, /Disarm before teaching/);
+  await send(MESSAGES.DISARM);
+});
+
+test('teach: saves buttons into the config; continues append up to 3; clear removes', async () => {
+  const save = (field, selector, label) => send(MESSAGES.TEACH_SAVE, content(runTab()), { field, selector, label });
+  const res = await save('placeOrder', '#place-order', 'Place your order');
+  assert.equal(res.ok, true, JSON.stringify(res));
+  assert.deepEqual(res.selectors.placeOrder, { selector: '#place-order', label: 'Place your order' });
+  assert.deepEqual(fake.store.get(STORAGE_KEYS.CONFIG).selectors.placeOrder, { selector: '#place-order', label: 'Place your order' });
+
+  await save('checkoutContinue', '#a', 'Use this address');
+  await save('checkoutContinue', '#b', 'Use this payment method');
+  await save('checkoutContinue', '#b', 'Use this payment method'); // duplicate: replaced, not added
+  await save('checkoutContinue', '#c', 'Continue');
+  assert.match((await save('checkoutContinue', '#d', 'Next')).error, /Up to 3/);
+  assert.equal(fake.store.get(STORAGE_KEYS.CONFIG).selectors.checkoutContinue.length, 3);
+
+  assert.match((await save('placeOrder', '', '')).error, /could not be saved/);
+  assert.match((await save('evilField', '#x', 'x')).error, /could not be saved/);
+
+  // The retailer tab gets the taught buttons with the run settings.
+  const hello = await send(MESSAGES.CONTENT_HELLO, content(runTab()));
+  assert.equal(hello.config.selectors.placeOrder.selector, '#place-order');
+  assert.equal(hello.config.stopBeforePlaceOrder, fake.store.get(STORAGE_KEYS.CONFIG).stopBeforePlaceOrder);
+
+  assert.equal((await send(MESSAGES.TEACH_CLEAR, page, { field: 'checkoutContinue', index: 1 })).ok, true);
+  assert.deepEqual(fake.store.get(STORAGE_KEYS.CONFIG).selectors.checkoutContinue.map((e) => e.selector), ['#a', '#c']);
+  await send(MESSAGES.TEACH_CLEAR, page, { field: 'placeOrder' });
+  assert.equal(fake.store.get(STORAGE_KEYS.CONFIG).selectors.placeOrder, null);
+  // Content scripts cannot clear (options page only).
+  assert.match((await send(MESSAGES.TEACH_CLEAR, content(runTab()), { field: 'placeOrder' })).error, /not allowed/);
 });

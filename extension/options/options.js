@@ -1,7 +1,7 @@
 (() => {
   'use strict';
 
-  const { STORAGE_KEYS, LIMITS, ACTIVE_STATUSES, MESSAGES } = RoBought.constants;
+  const { STORAGE_KEYS, LIMITS, ACTIVE_STATUSES, MESSAGES, TEACH_FIELDS } = RoBought.constants;
   const $ = (id) => document.getElementById(id);
   const form = $('form');
 
@@ -14,6 +14,10 @@
   };
 
   let locked = false;
+  let dirty = false; // the user has unsaved edits in the form
+  // Taught buttons live in the stored config (written by teach mode via the service worker);
+  // the form doesn't edit them, but saving must keep them — unless the store changed.
+  let stored = { selectors: RoBought.config.emptySelectors(), productUrl: '' };
 
   // ---- date helpers (datetime-local is always the user's local time zone) ----
 
@@ -43,7 +47,6 @@
   function readForm() {
     const mode = form.querySelector('input[name="triggerMode"]:checked');
     const raw = {
-      retailer: $('retailer').value,
       productUrl: $('productUrl').value,
       productName: $('productName').value,
       triggerMode: mode ? mode.value : null,
@@ -52,11 +55,19 @@
       maxTotalPrice: $('maxTotalPrice').value === '' ? null : $('maxTotalPrice').value,
     };
     for (const field of Object.keys(NUMERIC_FIELDS)) raw[field] = $(field).value;
+    raw.selectors = sameStore(raw.productUrl, stored.productUrl) ? stored.selectors : RoBought.config.emptySelectors();
     return raw;
   }
 
+  function sameStore(a, b) {
+    const ua = RoBought.url.parseProductUrl(a);
+    const ub = RoBought.url.parseProductUrl(b);
+    return !!ua && !!ub && RoBought.url.inScope(ua, ub);
+  }
+
+  const hasTaught = (sel) => Object.values(sel || {}).some((v) => (Array.isArray(v) ? v.length > 0 : !!v));
+
   function fillForm(config) {
-    $('retailer').value = config.retailer;
     $('productUrl').value = config.productUrl;
     $('productName').value = config.productName;
     for (const radio of form.querySelectorAll('input[name="triggerMode"]')) {
@@ -68,6 +79,76 @@
     $('maxTotalPrice').value = config.maxTotalPrice ?? '';
     updateModeVisibility();
     updateDropHint();
+    updateAutoBuyWarning();
+    updatePreset();
+    dirty = false;
+  }
+
+  function updateAutoBuyWarning() {
+    $('autoBuyWarning').hidden = $('stopBeforePlaceOrder').checked;
+  }
+
+  function updatePreset() {
+    const url = RoBought.url.parseProductUrl($('productUrl').value);
+    const preset = url ? RoBought.url.presetFor(url) : null;
+    $('presetName').textContent = preset
+      ? `${RoBought.url.PRESET_NAMES[preset]}${preset === 'generic' ? ' (Ro-Bought matches buttons by their text; teaching them is recommended)' : ' (built-in buttons; best-effort, so do a dry run)'}`
+      : '—';
+  }
+
+  // ---- taught buttons ----
+
+  function renderButtons() {
+    const url = RoBought.url.parseProductUrl(stored.productUrl);
+    const preset = url ? RoBought.url.presetFor(url) : 'generic';
+    $('buttonsIntro').textContent = url
+      ? `Store: ${RoBought.url.PRESET_NAMES[preset]}. Buttons you haven't taught use ${preset === 'generic' ? 'their button text' : 'the built-in preset, then button text'}.`
+      : 'Save a product first.';
+    const list = $('taughtList');
+    const items = [];
+    for (const f of TEACH_FIELDS) {
+      const value = stored.selectors[f.id];
+      const entries = f.multi ? value || [] : value ? [value] : [];
+      if (!entries.length) {
+        items.push(buttonRow(f, null, null));
+      } else {
+        entries.forEach((e, i) => items.push(buttonRow(f, e, f.multi ? i : null)));
+      }
+    }
+    list.replaceChildren(...items);
+    for (const b of list.querySelectorAll('button')) b.disabled = locked;
+  }
+
+  function buttonRow(field, entry, index) {
+    const li = document.createElement('li');
+    const what = document.createElement('div');
+    what.className = 'what';
+    const title = document.createElement('div');
+    title.textContent = `${field.label} — ${field.where}`;
+    what.append(title);
+    const detail = document.createElement('code');
+    detail.textContent = entry ? `${entry.label ? `“${entry.label}” ` : ''}${entry.selector}` : 'not taught (built-in / text match)';
+    what.append(detail);
+    li.append(what);
+    if (entry) {
+      const clear = document.createElement('button');
+      clear.type = 'button';
+      clear.textContent = 'Clear';
+      clear.addEventListener('click', async () => {
+        const res = await chrome.runtime.sendMessage({ type: MESSAGES.TEACH_CLEAR, field: field.id, ...(index !== null ? { index } : {}) });
+        $('buttonsMsg').textContent = res?.ok ? `Cleared ${field.label}.` : res?.error || 'Could not clear that.';
+      });
+      li.append(clear);
+    }
+    return li;
+  }
+
+  function setStored(config) {
+    stored = {
+      productUrl: config?.productUrl || '',
+      selectors: RoBought.config.cleanSelectors(config?.selectors),
+    };
+    renderButtons();
   }
 
   // ---- UI state ----
@@ -131,6 +212,7 @@
     locked = isLocked;
     $('locked').hidden = !isLocked;
     for (const el of form.elements) el.disabled = isLocked;
+    renderButtons();
   }
 
   // ---- save ----
@@ -147,12 +229,14 @@
       showBanner('formErrors', ['A run is active. Disarm it before changing settings.']);
       return;
     }
+    const droppedButtons = hasTaught(stored.selectors) && !hasTaught(result.config.selectors);
     await chrome.storage.local.set({ [STORAGE_KEYS.CONFIG]: result.config });
     await revokeOtherOrigins(patterns);
     const reg = await chrome.runtime.sendMessage({ type: MESSAGES.CONFIG_SAVED });
 
     const host = RoBought.url.baseHost(new URL(result.config.productUrl).hostname);
     const lines = [`Saved. Ro-Bought can now run on ${host} only.`];
+    if (droppedButtons) lines.push('The taught buttons were cleared because the store changed.');
     if (reg && reg.ok === false) lines.push(`Note: ${reg.error}`);
     else if (reg && !reg.registered && reg.reason) lines.push(`Note: ${reg.reason}`);
     showBanner('saved', lines);
@@ -189,15 +273,30 @@
       .catch((e) => showBanner('formErrors', [`Could not save: ${e.message}`]));
   });
 
+  form.addEventListener('input', () => {
+    dirty = true;
+  });
   form.addEventListener('change', (ev) => {
+    dirty = true;
     if (ev.target.name === 'triggerMode') updateModeVisibility();
+    if (ev.target.id === 'stopBeforePlaceOrder') updateAutoBuyWarning();
   });
   $('dropTime').addEventListener('input', updateDropHint);
+  $('productUrl').addEventListener('input', updatePreset);
 
   chrome.storage.onChanged.addListener((changes, area) => {
-    if (area !== 'local' || !changes[STORAGE_KEYS.RUN_STATE]) return;
-    const s = changes[STORAGE_KEYS.RUN_STATE].newValue;
-    setLocked(!!s && ACTIVE_STATUSES.includes(s.status));
+    if (area !== 'local') return;
+    if (changes[STORAGE_KEYS.CONFIG]) {
+      const next = changes[STORAGE_KEYS.CONFIG].newValue;
+      setStored(next);
+      // Settings changed elsewhere (another options tab, teach mode): show them, unless the
+      // user is mid-edit here, so a stale form can't silently overwrite newer settings.
+      if (next && !dirty) fillForm({ ...RoBought.config.defaults(), ...RoBought.config.validate(next).config, ...pickDisplayable(next) });
+    }
+    if (changes[STORAGE_KEYS.RUN_STATE]) {
+      const s = changes[STORAGE_KEYS.RUN_STATE].newValue;
+      setLocked(!!s && ACTIVE_STATUSES.includes(s.status));
+    }
   });
 
   // ---- init ----
@@ -214,6 +313,7 @@
     const stored = await chrome.storage.local.get([STORAGE_KEYS.CONFIG, STORAGE_KEYS.RUN_STATE]);
     const raw = stored[STORAGE_KEYS.CONFIG];
     // Show what was stored even if it no longer validates, so the user can fix it.
+    setStored(raw);
     fillForm(raw ? { ...RoBought.config.defaults(), ...RoBought.config.validate(raw).config, ...pickDisplayable(raw) } : RoBought.config.defaults());
     const state = stored[STORAGE_KEYS.RUN_STATE];
     setLocked(!!state && ACTIVE_STATUSES.includes(state.status));

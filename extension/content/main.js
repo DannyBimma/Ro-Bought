@@ -1,6 +1,7 @@
 // Ro-Bought content script — injected ONLY into the configured retailer site.
-// Handshake, page guards (pause + hand back), heartbeat/visibility, status panel, and the
-// trigger controller (content/watcher.js). The checkout engine arrives in Phase 4.
+// Handshake, page guards (pause + hand back), heartbeat/visibility and the status panel.
+// Wires up the trigger controller (content/watcher.js), the checkout engine
+// (content/checkout.js) and teach mode (content/teach.js).
 (() => {
   'use strict';
 
@@ -131,10 +132,21 @@
     if (s.status === RUN_STATUS.AWAITING_USER) {
       return {
         pill, tone,
-        title: 'In stock — your turn',
+        title: s.checkout?.ready ? 'Ready — your click' : 'Your turn',
         body: s.message,
-        hint: flash || 'Ro-Bought has stopped checking. Disarm when you are done.',
-        actions: [{ id: 'disarm', label: 'Done — disarm', variant: 'primary' }],
+        hint: flash || (s.checkout?.ready
+          ? 'The highlighted button places the order. Ro-Bought finishes the run when the confirmation appears.'
+          : 'Ro-Bought has stopped clicking. Finish the purchase yourself, or disarm.'),
+        actions: [{ id: 'disarm', label: 'Disarm', variant: 'danger' }],
+      };
+    }
+    if (s.status === RUN_STATUS.EXECUTING) {
+      return {
+        pill, tone,
+        title: 'Buying',
+        body: s.message,
+        hint: flash || 'Ro-Bought is clicking through checkout. Hands off this tab for a moment.',
+        actions: [disarm],
       };
     }
     if (ACTIVE_STATUSES.includes(s.status)) {
@@ -157,6 +169,7 @@
   }
 
   function renderOverlay() {
+    if (RoBought.teach.isOpen()) return; // teach mode owns the panel
     RoBought.overlay.render(overlayModel(), onOverlayAction);
   }
 
@@ -193,11 +206,34 @@
     else stopWatching();
     if (isActive() && runConfig) {
       RoBought.watcher.sync({ state, config: runConfig, watch: savedWatch, send, onNote: onWatcherNote });
+      RoBought.checkout.sync({ state, config: runConfig, send });
     } else {
       RoBought.watcher.stop();
+      RoBought.checkout.sync(null);
       watcherNote = '';
     }
+    if (isActive()) RoBought.teach.close(); // no teaching during a run
     renderOverlay();
+  }
+
+  // Teach mode is opened by the service worker (popup → "Teach buttons").
+  function onRuntimeMessage(msg, sender, sendResponse) {
+    if (sender.id !== chrome.runtime.id || sender.tab || !msg || msg.type !== MESSAGES.TEACH_OPEN) return false;
+    if (isActive()) {
+      sendResponse({ ok: false, error: 'Disarm before teaching buttons.' });
+      return false;
+    }
+    if (!runConfig) {
+      sendResponse({ ok: false, error: 'Reload the store tab and try again.' });
+      return false;
+    }
+    RoBought.teach.open({
+      config: msg.config && typeof msg.config === 'object' ? msg.config : runConfig,
+      send,
+      onClose: renderOverlay,
+    });
+    sendResponse({ ok: true });
+    return false;
   }
 
   function onStorageChanged(changes, area) {
@@ -226,6 +262,7 @@
     if (!ev.persisted) return;
     lastGuardSignature = undefined;
     RoBought.watcher.revive();
+    RoBought.checkout.revive();
     hello()
       .then(() => chrome.storage.local.get(STORAGE_KEYS.RUN_STATE))
       .then((stored) => applyState(stored[STORAGE_KEYS.RUN_STATE]))
@@ -238,8 +275,11 @@
     dead = true;
     stopWatching();
     RoBought.watcher.stop();
+    RoBought.checkout.shutdown();
+    RoBought.teach.close();
     try {
       chrome.storage.onChanged.removeListener(onStorageChanged);
+      chrome.runtime.onMessage.removeListener(onRuntimeMessage);
     } catch {
       // context already invalidated
     }
@@ -250,6 +290,7 @@
 
   async function init() {
     chrome.storage.onChanged.addListener(onStorageChanged);
+    chrome.runtime.onMessage.addListener(onRuntimeMessage);
     document.addEventListener('visibilitychange', onVisibilityChange);
     window.addEventListener('pageshow', onPageShow);
     await hello();

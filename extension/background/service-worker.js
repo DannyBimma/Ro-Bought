@@ -17,7 +17,7 @@ const {
   STORAGE_KEYS, RUN_STATUS, TERMINAL_STATUSES, ACTIVE_STATUSES, MESSAGES,
   CONTENT_SCRIPT_ID, CONTENT_SCRIPT_FILES, EVENT_LOG_MAX, WATCHDOG_ALARM, PREWARN_ALARM,
   PREWARN_MINUTES, STALE_AFTER_MS, HIDDEN_NOTICE_COOLDOWN_MS, STALE_NOTICE_COOLDOWN_MS,
-  CONTENT_GUARD_KINDS, PAUSE_HINTS, WATCH_RESULTS,
+  CONTENT_GUARD_KINDS, PAUSE_HINTS, WATCH_RESULTS, CHECKOUT,
 } = RoBought.constants;
 
 const EXTENSION_ORIGIN = self.location.origin;
@@ -40,7 +40,8 @@ function idleState() {
     ackSignature: null, // a guard the user chose to "Resume anyway" past
     firedAt: null,      // scheduled drop: when the retailer tab fired
     burstUntil: null,   // scheduled drop: end of the fast-retry window
-    purchaseLock: null,
+    checkout: null,     // { stage, visits: {stage: n}, startedAt, ready }
+    purchaseLock: null, // { at, total } — set at most once per run, the moment before "Place order"
     events: [],
     updatedAt: Date.now(),
   };
@@ -56,15 +57,15 @@ async function readRunState() {
   return s && typeof s === 'object' ? { ...idleState(), ...s } : idleState();
 }
 
-/** The settings the retailer tab needs to run the triggers (already validated). */
+/** The settings the retailer tab needs for triggers and checkout (already validated). */
 function runConfigOf(config) {
   const {
     productUrl, retailer, triggerMode, dropTime, fireOffsetMs, restockIntervalSec,
-    jitterPct, burstIntervalSec, burstWindowSec, maxTotalPrice,
+    jitterPct, burstIntervalSec, burstWindowSec, maxTotalPrice, stopBeforePlaceOrder, selectors,
   } = config;
   return {
     productUrl, retailer, triggerMode, dropTime, fireOffsetMs, restockIntervalSec,
-    jitterPct, burstIntervalSec, burstWindowSec, maxTotalPrice,
+    jitterPct, burstIntervalSec, burstWindowSec, maxTotalPrice, stopBeforePlaceOrder, selectors,
   };
 }
 
@@ -334,10 +335,17 @@ async function disarm(reason = 'Disarmed by you.') {
   let disarmed = false;
   const state = await mutateRunState((s) => {
     if (!ACTIVE_STATUSES.includes(s.status)) return null;
-    s.status = RUN_STATUS.IDLE;
-    s.message = reason;
+    if (s.purchaseLock) {
+      // "Place order" was clicked this run: the order may exist. End the run for good, so a
+      // new one needs an explicit Reset (after the user has checked their orders).
+      s.status = RUN_STATUS.ABORTED;
+      s.message = `${reason} Ro-Bought had already clicked "Place order": check your orders before starting a new run.`;
+    } else {
+      s.status = RUN_STATUS.IDLE;
+      s.message = reason;
+    }
     s.pause = null;
-    pushEvent(s, 'info', reason);
+    pushEvent(s, 'info', s.message);
     disarmed = true;
     return s;
   });
@@ -417,7 +425,9 @@ async function markPauseCleared() {
   let cleared = false;
   await mutateRunState((s) => {
     if (s.status !== RUN_STATUS.PAUSED || !s.pause || s.pause.cleared) return null;
-    if (s.pause.kind === 'tab_closed' || s.pause.kind === 'discarded') return null;
+    // Only on-page checks and leaving the site can "clear". A stalled checkout step or a closed
+    // tab stays paused until the user acts.
+    if (!CONTENT_GUARD_KINDS.includes(s.pause.kind) && s.pause.kind !== 'offsite') return null;
     s.pause.cleared = true;
     s.message = 'It looks clear now. Click Resume when you are ready.';
     pushEvent(s, 'info', `Cleared: ${s.pause.label}.`);
@@ -444,6 +454,11 @@ async function resume() {
     // "Resume anyway" past an on-page check: remember it so the same check on the same
     // page doesn't immediately re-pause. Tab-level pauses are one-off events, never acked.
     if (!pause.cleared && CONTENT_GUARD_KINDS.includes(pause.kind)) s.ackSignature = pause.signature;
+    if (s.status === RUN_STATUS.EXECUTING && s.checkout) {
+      // The user fixed something: give the checkout a fresh set of attempts and time.
+      s.checkout.visits = {};
+      s.checkout.startedAt = Date.now();
+    }
     s.pause = null;
     s.activeSince = Date.now();
     s.message = 'Resumed.';
@@ -600,22 +615,230 @@ async function onAvailable(msg, sender) {
   if (!state) return { ok: false, error: 'Not the run tab.' };
   const detail = cleanText(msg.detail || 'The product can be bought', 200);
   const price = Number.isFinite(msg.price) ? msg.price : null;
-  let handedOff = false;
+  let started = false;
   const next = await mutateRunState((s) => {
     if (s.runId !== state.runId) return null;
     if (s.status !== RUN_STATUS.WATCHING && s.status !== RUN_STATUS.WAITING) return null;
-    // Phase 3: no checkout engine yet, so hand the purchase to the user right away.
-    // Phase 4 switches this to EXECUTING.
-    s.status = RUN_STATUS.AWAITING_USER;
-    s.message = `In stock now — ${detail}${price !== null ? ` (${price.toFixed(2)})` : ''}. Add it to your cart and check out.`;
+    s.status = RUN_STATUS.EXECUTING;
+    s.checkout = { stage: null, visits: {}, startedAt: Date.now(), ready: false };
+    s.message = `In stock — buying now (${detail}${price !== null ? `, ${price.toFixed(2)}` : ''}).`;
     pushEvent(s, 'info', `In stock: ${detail}.`);
+    started = true;
+    return s;
+  });
+  if (!started) return { ok: false, error: 'Not watching.' };
+  notify('available', 'In stock — Ro-Bought is checking out', 'Watch the retailer tab. Ro-Bought will hand over if it needs you.');
+  if (next.tabId != null) focusTab(next.tabId).catch(() => {});
+  return { ok: true };
+}
+
+// ---------------------------------------------------------------------------
+// Checkout: progress, hand-offs, the once-only purchase lock, completion
+// ---------------------------------------------------------------------------
+
+const CHECKOUT_STAGES = ['product', 'cart', 'checkout', 'review', 'placing'];
+const STAGE_MESSAGES = {
+  product: 'Buying: adding it to the cart…',
+  cart: 'Buying: checking the cart…',
+  checkout: 'Buying: going through checkout…',
+  review: 'Buying: final review…',
+};
+
+async function onCheckoutProgress(msg, sender) {
+  const state = await runStateForSender(sender);
+  if (!state) return { ok: false, error: 'Not the run tab.' };
+  const stage = CHECKOUT_STAGES.includes(msg.stage) ? msg.stage : null;
+  if (!stage) return { ok: false, error: 'Unknown checkout stage.' };
+  let reply = { ok: true };
+  await mutateRunState((s) => {
+    if (s.runId !== state.runId || s.status !== RUN_STATUS.EXECUTING) {
+      reply = { ok: false, error: 'Not checking out.' };
+      return null;
+    }
+    const c = s.checkout || { stage: null, visits: {}, startedAt: Date.now(), ready: false };
+    if (msg.soldOut === true && stage === 'product' && !s.purchaseLock) {
+      s.status = RUN_STATUS.WATCHING;
+      s.checkout = null;
+      s.message = 'It sold out again before Ro-Bought could add it. Watching again.';
+      pushEvent(s, 'warn', s.message);
+      reply = { ok: false, rewatch: true };
+      return s;
+    }
+    if (Date.now() - c.startedAt > CHECKOUT.TIMEOUT_MS) {
+      reply = { ok: false, error: 'The checkout is taking too long' };
+      return null;
+    }
+    if (msg.entered !== false) {
+      c.visits[stage] = (c.visits[stage] || 0) + 1;
+      if (c.visits[stage] > CHECKOUT.STAGE_MAX_VISITS) {
+        reply = { ok: false, error: `Ro-Bought keeps landing on the ${stage} page` };
+        return null;
+      }
+    }
+    c.stage = stage;
+    s.checkout = c;
+    s.message = STAGE_MESSAGES[stage] || s.message;
+    const note = typeof msg.note === 'string' ? cleanText(msg.note, 120) : '';
+    pushEvent(s, 'info', note ? `Checkout (${stage}): ${note}` : `Checkout: ${stage} page.`);
+    return s;
+  });
+  return reply;
+}
+
+async function onCheckoutHandoff(msg, sender) {
+  const state = await runStateForSender(sender);
+  if (!state) return { ok: false, error: 'Not the run tab.' };
+  const reason = cleanText(msg.reason || 'Ro-Bought needs you to take over', 220);
+  const stage = cleanText(msg.stage || 'checkout', 20);
+
+  if (msg.mode === 'pause') {
+    if (state.status !== RUN_STATUS.EXECUTING) return { ok: false, error: 'Not checking out.' };
+    return pauseRun({ kind: 'checkout', label: reason, signature: `checkout:${stage}:${cleanText(msg.path, 200)}` });
+  }
+
+  let handedOff = false;
+  const ready = msg.ready === true;
+  const next = await mutateRunState((s) => {
+    if (s.runId !== state.runId || s.status !== RUN_STATUS.EXECUTING) return null;
+    s.status = RUN_STATUS.AWAITING_USER;
+    s.checkout = { ...(s.checkout || { visits: {}, startedAt: Date.now() }), stage, ready };
+    s.message = `${reason}.`;
+    pushEvent(s, ready ? 'info' : 'warn', s.message);
     handedOff = true;
     return s;
   });
-  if (!handedOff) return { ok: false, error: 'Not watching.' };
-  notify('available', 'In stock — your turn!', next.message, true);
+  if (!handedOff) return { ok: false, error: 'Not checking out.' };
+  notify('handoff', ready ? 'Ready — your click' : 'Ro-Bought: your turn', next.message, true);
   if (next.tabId != null) focusTab(next.tabId).catch(() => {});
   return { ok: true };
+}
+
+/**
+ * The once-only purchase lock. Granted at most once per run, and only when automatic purchase
+ * is on and the reported total is within the max price. Persisted before the click happens, so
+ * no reload, crash or restart can lead to a second "Place order".
+ */
+async function onClaimPurchase(msg, sender) {
+  const cfg = await loadConfig();
+  const state = await runStateForSender(sender);
+  if (!state || !cfg?.ok) return { ok: false, error: 'Not the run tab.' };
+  const total = Number.isFinite(msg.total) ? msg.total : null;
+  let reply = { ok: false, error: 'Not checking out' };
+  await mutateRunState((s) => {
+    if (s.runId !== state.runId || s.status !== RUN_STATUS.EXECUTING) return null;
+    if (s.purchaseLock) {
+      reply = { ok: false, error: 'Ro-Bought already clicked "Place order" once in this run, so it will not click again' };
+      return null;
+    }
+    if (cfg.config.stopBeforePlaceOrder) {
+      reply = { ok: false, error: 'Automatic purchase is off, so Ro-Bought stopped one click short' };
+      return null;
+    }
+    const max = cfg.config.maxTotalPrice;
+    if (max === null || total === null || total > max) {
+      reply = { ok: false, error: `The order total (${total ?? 'unknown'}) is not within your max (${max ?? 'not set'}), so Ro-Bought did not place the order` };
+      return null;
+    }
+    s.purchaseLock = { at: Date.now(), total };
+    s.checkout = { ...(s.checkout || { visits: {}, startedAt: Date.now() }), stage: 'placing' };
+    s.message = `Placing the order (total ${total.toFixed(2)})…`;
+    pushEvent(s, 'info', s.message);
+    reply = { ok: true };
+    return s;
+  });
+  return reply;
+}
+
+async function onOrderPlaced(msg, sender) {
+  const state = await runStateForSender(sender);
+  if (!state) return { ok: false, error: 'Not the run tab.' };
+  let completed = false;
+  const next = await mutateRunState((s) => {
+    if (s.runId !== state.runId || !s.checkout) return null;
+    const byBot = s.status === RUN_STATUS.EXECUTING && !!s.purchaseLock;
+    const byUser = s.status === RUN_STATUS.AWAITING_USER || s.status === RUN_STATUS.PAUSED;
+    if (!byBot && !byUser) return null;
+    s.status = RUN_STATUS.COMPLETED;
+    s.pause = null;
+    s.message = byBot && s.purchaseLock.total !== null
+      ? `Order placed (total ${s.purchaseLock.total.toFixed(2)}). Check your email for the store's confirmation.`
+      : "Order placed. Check your email for the store's confirmation.";
+    pushEvent(s, 'info', s.message);
+    completed = true;
+    return s;
+  });
+  if (!completed) return { ok: false, error: 'No purchase in progress.' };
+  releaseTab(next.tabId);
+  clearNotification('handoff');
+  clearNotification('paused');
+  notify('completed', 'Order placed!', next.message, true);
+  return { ok: true };
+}
+
+// ---------------------------------------------------------------------------
+// Teach mode: remember the buttons the user points at
+// ---------------------------------------------------------------------------
+
+async function teachOpen() {
+  const s = await readRunState();
+  if (ACTIVE_STATUSES.includes(s.status)) return { ok: false, error: 'Disarm before teaching buttons.' };
+  const cfg = await loadConfig();
+  if (!cfg?.ok) return { ok: false, error: 'Save a product in the options first.' };
+  const [tab] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
+  const host = RoBought.url.baseHost(new URL(cfg.config.productUrl).hostname);
+  if (!tab?.url || !RoBought.url.inScope(tab.url, cfg.config.productUrl)) {
+    return { ok: false, error: `Open ${host} in this tab first, then click Teach buttons.` };
+  }
+  try {
+    const res = await chrome.tabs.sendMessage(tab.id, { type: MESSAGES.TEACH_OPEN, config: runConfigOf(cfg.config) }, { frameId: 0 });
+    return res && typeof res === 'object' ? res : { ok: false, error: 'Reload the store tab and try again.' };
+  } catch {
+    return { ok: false, error: "Reload the store tab and try again (Ro-Bought isn't running in it yet)." };
+  }
+}
+
+async function saveSelectors(mutate) {
+  const { [STORAGE_KEYS.CONFIG]: raw } = await chrome.storage.local.get(STORAGE_KEYS.CONFIG);
+  if (!raw) return { ok: false, error: 'Save a product in the options first.' };
+  const selectors = RoBought.config.cleanSelectors(raw.selectors);
+  const problem = mutate(selectors);
+  if (problem) return { ok: false, error: problem };
+  const result = RoBought.config.validate({ ...raw, selectors });
+  if (!result.ok) return { ok: false, error: 'Fix the settings in the options first.' };
+  await chrome.storage.local.set({ [STORAGE_KEYS.CONFIG]: result.config });
+  return { ok: true, selectors: result.config.selectors };
+}
+
+async function teachSave(msg) {
+  const s = await readRunState();
+  if (ACTIVE_STATUSES.includes(s.status)) return { ok: false, error: 'Disarm before teaching buttons.' };
+  const field = RoBought.constants.TEACH_FIELDS.find((f) => f.id === msg.field);
+  const entry = RoBought.config.cleanTaught({ selector: msg.selector, label: msg.label });
+  if (!field || !entry) return { ok: false, error: 'That button could not be saved.' };
+  return saveSelectors((sel) => {
+    if (!field.multi) {
+      sel[field.id] = entry;
+      return null;
+    }
+    const list = sel[field.id].filter((e) => e.selector !== entry.selector || e.label !== entry.label);
+    if (list.length >= RoBought.constants.MAX_CONTINUE_SELECTORS) {
+      return `Up to ${RoBought.constants.MAX_CONTINUE_SELECTORS} continue buttons. Clear one in the options first.`;
+    }
+    sel[field.id] = [...list, entry];
+    return null;
+  });
+}
+
+async function teachClear(msg) {
+  const s = await readRunState();
+  if (ACTIVE_STATUSES.includes(s.status)) return { ok: false, error: 'Disarm before changing buttons.' };
+  const field = RoBought.constants.TEACH_FIELDS.find((f) => f.id === msg.field);
+  if (!field) return { ok: false, error: 'Unknown button.' };
+  return saveSelectors((sel) => {
+    if (field.multi && Number.isInteger(msg.index)) sel[field.id] = sel[field.id].filter((_, i) => i !== msg.index);
+    else sel[field.id] = field.multi ? [] : null;
+    return null;
+  });
 }
 
 chrome.alarms.onAlarm.addListener((alarm) => {
@@ -769,6 +992,8 @@ const PAGE_HANDLERS = {
   [MESSAGES.RESUME]: () => resume(),
   [MESSAGES.RESET]: () => reset(),
   [MESSAGES.CONFIG_SAVED]: async () => ({ ok: true, ...(await syncContentScripts()) }),
+  [MESSAGES.TEACH_OPEN]: () => teachOpen(),
+  [MESSAGES.TEACH_CLEAR]: (msg) => teachClear(msg),
 };
 
 const CONTENT_HANDLERS = {
@@ -778,6 +1003,11 @@ const CONTENT_HANDLERS = {
   [MESSAGES.WATCH_REPORT]: onWatchReport,
   [MESSAGES.DROP_FIRED]: onDropFired,
   [MESSAGES.AVAILABLE]: onAvailable,
+  [MESSAGES.CHECKOUT_PROGRESS]: onCheckoutProgress,
+  [MESSAGES.CHECKOUT_HANDOFF]: onCheckoutHandoff,
+  [MESSAGES.CLAIM_PURCHASE]: onClaimPurchase,
+  [MESSAGES.ORDER_PLACED]: onOrderPlaced,
+  [MESSAGES.TEACH_SAVE]: (msg) => teachSave(msg),
   [MESSAGES.RESUME]: contentResume,
   [MESSAGES.DISARM]: contentDisarm,
 };
@@ -818,9 +1048,15 @@ chrome.runtime.onStartup.addListener(async () => {
   // Chrome was closed, so any active run was interrupted. Never resume silently.
   await mutateRunState((s) => {
     if (!ACTIVE_STATUSES.includes(s.status)) return null;
-    s.status = RUN_STATUS.IDLE;
+    if (s.purchaseLock) {
+      // "Place order" was clicked before the restart: the order may exist. End for good.
+      s.status = RUN_STATUS.ABORTED;
+      s.message = 'Chrome was restarted after Ro-Bought clicked "Place order". Check your orders before starting a new run.';
+    } else {
+      s.status = RUN_STATUS.IDLE;
+      s.message = 'Chrome was restarted, so the run was disarmed. Re-arm when ready.';
+    }
     s.pause = null;
-    s.message = 'Chrome was restarted, so the run was disarmed. Re-arm when ready.';
     pushEvent(s, 'warn', s.message);
     return s;
   }).catch(logError);

@@ -58,5 +58,28 @@
     }
   }
 
-  RoBought.url = Object.freeze({ parseProductUrl, scopePatterns, inScope, baseHost });
+  const PRESET_NAMES = Object.freeze({
+    amazon: 'Amazon.com',
+    nintendo: 'Nintendo US store',
+    generic: 'Generic store',
+  });
+
+  /**
+   * Which built-in retailer preset applies to a product URL (US stores only).
+   * @returns {'amazon'|'nintendo'|'generic'}
+   */
+  function presetFor(url) {
+    let u;
+    try {
+      u = url instanceof URL ? url : new URL(url);
+    } catch {
+      return 'generic';
+    }
+    const host = baseHost(u.hostname);
+    if (host === 'amazon.com') return 'amazon';
+    if (host === 'nintendo.com' && /^\/us\/store\//i.test(u.pathname)) return 'nintendo';
+    return 'generic';
+  }
+
+  RoBought.url = Object.freeze({ parseProductUrl, scopePatterns, inScope, baseHost, presetFor, PRESET_NAMES });
 })();

@@ -8,6 +8,7 @@
   const $ = (id) => document.getElementById(id);
 
   let ticketReason = null;
+  let activeTabUrl = null;
   let latest = null; // last GET_STATUS result, re-rendered by the 1 s ticker
 
   function send(type) {
@@ -58,6 +59,8 @@
     $('arm').disabled = !configValid || !!ticketReason;
     $('disarm').hidden = !active;
     $('reset').hidden = !terminal;
+    const onStore = !!config && !!activeTabUrl && RoBought.url.inScope(activeTabUrl, config.productUrl);
+    $('teach').hidden = active || !configValid || !onStore;
 
     renderEvents(state.events || []);
     renderWatchLine();
@@ -142,6 +145,7 @@
   async function checkActiveTab() {
     // activeTab is granted by opening this popup, so the current tab's URL is readable.
     const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+    activeTabUrl = tab?.url || null;
     ticketReason = tab?.url ? RoBought.ticketGuard.checkUrl(tab.url) : null;
     if (ticketReason) {
       $('ticketBlock').textContent =
@@ -154,6 +158,12 @@
   $('resume').addEventListener('click', () => command(MESSAGES.RESUME));
   $('disarm').addEventListener('click', () => command(MESSAGES.DISARM));
   $('reset').addEventListener('click', () => command(MESSAGES.RESET));
+  $('teach').addEventListener('click', async () => {
+    showError('');
+    const res = await send(MESSAGES.TEACH_OPEN);
+    if (res?.ok) window.close(); // get out of the way: the teach panel is on the page
+    else showError(res?.error || 'Could not open teach mode.');
+  });
   $('options').addEventListener('click', () => chrome.runtime.openOptionsPage());
 
   chrome.storage.onChanged.addListener((changes, area) => {

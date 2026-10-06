@@ -1,28 +1,52 @@
-// A tiny in-memory "store" for rehearsing drops and restocks without a real retailer.
+// A tiny in-memory "store" for rehearsing drops, restocks and checkout without a real retailer.
 // Used by tools/serve.mjs (manual testing) and tests/e2e/run.mjs (automated).
 //
-//   /store/product.html  server-rendered product page (JSON-LD + Add to cart button)
-//   /store/spa.html      client-rendered product page (stock is fetched after load)
-//   /store/api/stock     JSON stock endpoint used by spa.html
-//   /__control?stock=in|out&price=…&dropIn=<seconds>&dropAt=<epoch ms>&skewMs=…&fail=429:2:5&reset=1
-//   /__control/log       recent requests (for checking polite intervals)
+// Product and stock
+//   /store/product.html        server-rendered product page (JSON-LD + Add to cart form)
+//   /store/spa.html            client-rendered product page (stock is fetched after load)
+//   /store/api/stock           JSON stock endpoint used by spa.html
+// Checkout (plain GET forms, like many real stores' full-page flows)
+//   /store/cart/add            adds the product, then redirects to the cart
+//   /store/cart.html           cart with one quantity field per line
+//   /store/checkout/address.html → payment.html → review.html → /store/checkout/place
+//   /store/checkout/thankyou.html?order=…
+// Control
+//   /__control?stock=in|out&price=…&tax=…&dropIn=<s>&dropAt=<epoch ms>&skewMs=…&fail=429:2:5
+//              &extraItem=1&reviewCaptcha=1&placeFails=1&addFails=1&placeLabel=…&reset=1
+//   /__control/log             recent requests (for checking polite intervals)
 
 const LOG_MAX = 2000;
+const SKU = 'console';
 
 const esc = (s) => String(s).replace(/[&<>"']/g, (c) => `&#${c.charCodeAt(0)};`);
 
 export function createMockStore() {
-  const initial = () => ({ stock: 'out', price: 499.99, dropAt: 0, skewMs: 0 });
+  const initial = () => ({
+    stock: 'out', price: 499.99, tax: 30, dropAt: 0, skewMs: 0,
+    reviewCaptcha: false, placeFails: false, addFails: false,
+    placeLabel: 'Place your order', // the final button's text (change it to test taught buttons)
+  });
   let state = initial();
+  let cart = [];   // [{ sku, name, price, qty }]
+  let orders = []; // [{ id, items, total, t }]
   let failQueue = []; // [{ status, retryAfter }]
   let log = [];
 
   const inStock = () => state.stock === 'in' || (state.dropAt > 0 && Date.now() >= state.dropAt);
+  const cartTotal = () => cart.reduce((sum, l) => sum + l.price * l.qty, 0);
+  const orderTotal = () => Math.round((cartTotal() + (cart.length ? state.tax : 0)) * 100) / 100;
 
   function set(patch) {
     if (patch.stock === 'in' || patch.stock === 'out') state.stock = patch.stock;
-    for (const key of ['price', 'dropAt', 'skewMs']) {
+    for (const key of ['price', 'tax', 'dropAt', 'skewMs']) {
       if (patch[key] !== undefined && Number.isFinite(Number(patch[key]))) state[key] = Number(patch[key]);
+    }
+    for (const key of ['reviewCaptcha', 'placeFails', 'addFails']) {
+      if (patch[key] !== undefined) state[key] = patch[key] === true || patch[key] === '1' || patch[key] === 'true';
+    }
+    if (typeof patch.placeLabel === 'string' && patch.placeLabel.trim()) state.placeLabel = patch.placeLabel.trim().slice(0, 40);
+    if (patch.extraItem === true || patch.extraItem === '1') {
+      cart.push({ sku: 'cable', name: 'HDMI cable', price: 9.99, qty: 1 });
     }
     return snapshot();
   }
@@ -34,18 +58,30 @@ export function createMockStore() {
 
   function reset() {
     state = initial();
+    cart = [];
+    orders = [];
     failQueue = [];
     log = [];
   }
 
-  const snapshot = () => ({ ...state, inStock: inStock(), pendingFailures: failQueue.length });
+  const snapshot = () => ({
+    ...state, inStock: inStock(), pendingFailures: failQueue.length,
+    cart: cart.map((l) => ({ sku: l.sku, qty: l.qty })), orders: orders.length,
+  });
   const requests = (filter = () => true) => log.filter(filter);
 
+  // ---------------------------------------------------------------------------
+  // Pages
+  // ---------------------------------------------------------------------------
+
   function nav() {
-    let links = '';
+    let links = '<a href="/store/cart.html">Cart</a> ';
     for (let i = 1; i <= 40; i++) links += `<a href="/store/category-${i}.html">Category ${i}</a> `;
     return `<nav>${links}</nav>`;
   }
+
+  const page = (title, body) => `<!doctype html><html lang="en"><head><meta charset="utf-8"><title>${esc(title)} | Mock Store</title></head>
+<body>${nav()}<main>${body}</main></body></html>`;
 
   function productPage() {
     const available = inStock();
@@ -64,7 +100,13 @@ export function createMockStore() {
 <script type="application/ld+json">${JSON.stringify(ld).replace(/</g, '\\u003c')}</script></head>
 <body>${nav()}<main><h1>Mock Console 1TB</h1><p class="price">$${esc(state.price.toFixed(2))}</p>
 <p id="availability">${available ? 'In stock' : 'Out of stock'}</p>
-<button id="add-to-cart"${available ? '' : ' disabled'}>Add to cart</button></main></body></html>`;
+<form action="/store/cart/add" method="get">
+  <input type="hidden" name="sku" value="${SKU}">
+  <label>Quantity <select name="quantity"><option value="1">1</option><option value="2">2</option></select></label>
+  <button id="add-to-cart" type="submit"${available ? '' : ' disabled'}>Add to cart</button>
+</form>
+<form action="/store/buy-now" method="get"><button id="buy-now-button" type="submit"${available ? '' : ' disabled'}>Buy now</button></form>
+</main></body></html>`;
   }
 
   function spaPage() {
@@ -76,10 +118,53 @@ export function createMockStore() {
     const { inStock, price } = await res.json();
     const app = document.getElementById('app');
     app.innerHTML = '<h1>Mock Console 1TB</h1><p class="price">$' + price.toFixed(2) + '</p>' +
-      (inStock ? '<button id="add-to-cart">Add to cart</button>' : '<button id="notify">Notify me</button>');
+      (inStock
+        ? '<form action="/store/cart/add" method="get"><input type="hidden" name="sku" value="console"><button id="add-to-cart" type="submit">Add to cart</button></form>'
+        : '<button id="notify">Notify me</button>');
   }, 400);
 </script></body></html>`;
   }
+
+  function cartPage() {
+    if (!cart.length) return page('Cart', '<h1>Shopping cart</h1><p>Your cart is empty.</p>');
+    const lines = cart.map((l) => `<div class="cart-line" data-sku="${esc(l.sku)}">${esc(l.name)} — $${l.price.toFixed(2)}
+      <label>Qty <input name="qty-${esc(l.sku)}" type="number" value="${l.qty}" min="0"></label></div>`).join('');
+    return page('Cart', `<h1>Shopping cart</h1><form action="/store/checkout/address.html" method="get">${lines}
+      <p>Subtotal: $${cartTotal().toFixed(2)}</p><button type="submit" id="checkout">Proceed to checkout</button></form>`);
+  }
+
+  const addressPage = () => page('Delivery address', `<h1>Choose a delivery address</h1>
+    <form action="/store/checkout/payment.html" method="get">
+      <label><input type="radio" name="address" value="home" checked> Jo Shopper, 1 Main St, Springfield</label>
+      <button type="submit">Use this address</button></form>`);
+
+  const paymentPage = () => page('Payment', `<h1>Choose a payment method</h1>
+    <form action="/store/checkout/review.html" method="get">
+      <label><input type="radio" name="card" value="visa" checked> Visa ending 4242</label>
+      <button type="submit">Use this payment method</button></form>`);
+
+  function reviewPage(error) {
+    const lines = cart.map((l) => `<li>${esc(l.name)} × ${l.qty} — $${(l.price * l.qty).toFixed(2)}</li>`).join('');
+    const captcha = state.reviewCaptcha
+      ? '<div id="px-captcha" style="width:300px;height:60px;border:1px solid #999">Press &amp; Hold</div>'
+      : '';
+    return page('Review your order', `<h1>Review your order</h1>
+      ${error ? `<p role="alert" class="error">${esc(error)}</p>` : ''}
+      <section><h2>Ship to</h2><p>Jo Shopper, 1 Main St, Springfield</p></section>
+      <section><h2>Pay with</h2><p>Visa ending 4242</p></section>
+      <ul>${lines}</ul>
+      <div class="row"><span>Items:</span> <span>$${cartTotal().toFixed(2)}</span></div>
+      <div class="row"><span>Estimated tax:</span> <span>$${state.tax.toFixed(2)}</span></div>
+      <div class="row"><strong>Order total:</strong> <strong>$${orderTotal().toFixed(2)}</strong></div>
+      ${captcha}
+      <form action="/store/checkout/place" method="get"><button type="submit" id="place-order">${esc(state.placeLabel)}</button></form>`);
+  }
+
+  const thankYouPage = (id) => page('Thank you', `<h1>Thank you, your order has been placed</h1><p>Order number: ${esc(id)}</p>`);
+
+  // ---------------------------------------------------------------------------
+  // HTTP
+  // ---------------------------------------------------------------------------
 
   function send(res, req, status, type, body, headers = {}) {
     res.writeHead(status, {
@@ -90,6 +175,9 @@ export function createMockStore() {
     });
     res.end(req.method === 'HEAD' ? undefined : body);
   }
+
+  const redirect = (res, req, location) => send(res, req, 302, 'text/plain', '', { Location: location });
+  const html = (res, req, body) => send(res, req, 200, 'text/html; charset=utf-8', body);
 
   /** @returns {boolean} true if the request was handled */
   function handle(req, res, url) {
@@ -130,18 +218,60 @@ export function createMockStore() {
       send(res, req, status, 'text/html; charset=utf-8', `<h1>${status}</h1>`, retryAfter !== null ? { 'Retry-After': String(retryAfter) } : {});
       return true;
     }
-    if (url.pathname === '/store/product.html') {
-      send(res, req, 200, 'text/html; charset=utf-8', productPage());
-    } else if (url.pathname === '/store/spa.html') {
-      send(res, req, 200, 'text/html; charset=utf-8', spaPage());
-    } else if (url.pathname === '/store/api/stock') {
-      send(res, req, 200, 'application/json', JSON.stringify({ inStock: inStock(), price: state.price }));
-    } else {
-      entry.status = 404;
-      send(res, req, 404, 'text/plain', 'Not found');
+
+    switch (url.pathname) {
+      case '/store/product.html': html(res, req, productPage()); break;
+      case '/store/spa.html': html(res, req, spaPage()); break;
+      case '/store/api/stock':
+        send(res, req, 200, 'application/json', JSON.stringify({ inStock: inStock(), price: state.price }));
+        break;
+      case '/store/cart/add': {
+        if (state.addFails || !inStock()) {
+          // Lost the race: someone else got the last one.
+          state.addFails = false;
+          state.stock = 'out';
+          state.dropAt = 0;
+          redirect(res, req, '/store/product.html?soldout=1');
+          break;
+        }
+        const qty = Math.max(1, Number(url.searchParams.get('quantity')) || 1);
+        const line = cart.find((l) => l.sku === SKU);
+        if (line) line.qty += qty;
+        else cart.push({ sku: SKU, name: 'Mock Console 1TB', price: state.price, qty });
+        redirect(res, req, '/store/cart.html');
+        break;
+      }
+      case '/store/buy-now': {
+        // An instant purchase, like Amazon's 1-Click "Buy now". Ro-Bought must never press it.
+        const id = `INSTANT-${1000 + orders.length + 1}`;
+        orders.push({ id, items: [{ sku: SKU, name: 'Mock Console 1TB', price: state.price, qty: 1 }], total: state.price, t: Date.now(), instant: true });
+        redirect(res, req, `/store/checkout/thankyou.html?order=${id}`);
+        break;
+      }
+      case '/store/cart.html': html(res, req, cartPage()); break;
+      case '/store/checkout/address.html': html(res, req, addressPage()); break;
+      case '/store/checkout/payment.html': html(res, req, paymentPage()); break;
+      case '/store/checkout/review.html': html(res, req, reviewPage('')); break;
+      case '/store/checkout/place': {
+        if (!cart.length) {
+          redirect(res, req, '/store/cart.html');
+        } else if (state.placeFails) {
+          html(res, req, reviewPage('Something went wrong. Please try again.'));
+        } else {
+          const id = `MOCK-${1000 + orders.length + 1}`;
+          orders.push({ id, items: cart.map((l) => ({ ...l })), total: orderTotal(), t: Date.now() });
+          cart = [];
+          redirect(res, req, `/store/checkout/thankyou.html?order=${id}`);
+        }
+        break;
+      }
+      case '/store/checkout/thankyou.html': html(res, req, thankYouPage(url.searchParams.get('order') || '')); break;
+      default:
+        entry.status = 404;
+        send(res, req, 404, 'text/plain', 'Not found');
     }
     return true;
   }
 
-  return { handle, set, failNext, reset, snapshot, requests };
+  return { handle, set, failNext, reset, snapshot, requests, orders: () => orders.map((o) => ({ ...o })) };
 }

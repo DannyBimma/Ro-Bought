@@ -36,6 +36,9 @@
       'content/clock.js',
       'content/watcher.js',
       'content/overlay.js',
+      'content/finder.js',
+      'content/checkout.js',
+      'content/teach.js',
       'content/main.js',
     ],
 
@@ -50,7 +53,9 @@
     // tab-level kinds are detected by the service worker from tab events.
     CONTENT_GUARD_KINDS: ['captcha', 'challenge', 'queue', 'signin', 'payment', 'blocked'],
     TAB_GUARD_KINDS: ['offsite', 'tab_closed', 'discarded'],
+    // 'checkout': the checkout engine got stuck and needs the user to do one step.
     PAUSE_HINTS: {
+      checkout: 'Do this step yourself, then click Resume — or just finish the purchase by hand.',
       captcha: 'Ro-Bought never solves CAPTCHAs. Complete it yourself, then click Resume.',
       challenge: 'Ro-Bought never bypasses bot checks. Complete it yourself, then click Resume.',
       queue: 'Ro-Bought never skips queues. Wait your turn in this tab, then click Resume.',
@@ -134,6 +139,28 @@
       UNREADABLE_NOTICE_AFTER: 3,     // consecutive "can't tell" checks before telling the user
     },
 
+    // Checkout engine tuning (milliseconds unless stated).
+    CHECKOUT: {
+      STAGE_MAX_VISITS: 3,        // landing on the same stage more often than this = a loop
+      TIMEOUT_MS: 5 * 60_000,     // the whole checkout, from "in stock" to confirmation
+      FIND_TIMEOUT_MS: 10_000,    // waiting for a button to appear
+      SETTLE_MS: 6_000,           // waiting for a page to become recognisable
+      NAV_TIMEOUT_MS: 15_000,     // waiting for a click to lead somewhere
+      CONFIRM_TIMEOUT_MS: 30_000, // waiting for the order confirmation after Place order
+      MAX_CONTINUES_PER_PAGE: 3,
+    },
+
+    // Buttons the user can teach (Options → Buttons, or ⚡ → Teach buttons on the store page).
+    TEACH_FIELDS: [
+      { id: 'addToCart', label: 'Add to cart', where: 'product page' },
+      { id: 'proceedToCheckout', label: 'Proceed to checkout', where: 'cart page' },
+      { id: 'checkoutContinue', label: 'Continue / Use this address / Use this payment', where: 'checkout pages (up to 3)', multi: true },
+      { id: 'placeOrder', label: 'Place order', where: 'final review page' },
+      { id: 'orderTotal', label: 'Order total amount', where: 'final review page' },
+      { id: 'confirmation', label: 'Order confirmation message', where: 'thank-you page' },
+    ],
+    MAX_CONTINUE_SELECTORS: 3,
+
     // Last-check outcomes reported by the watcher.
     WATCH_RESULTS: ['in_stock', 'out_of_stock', 'unknown', 'over_price', 'error', 'blocked', 'backoff'],
 
@@ -153,6 +180,15 @@
       WATCH_REPORT: 'WATCH_REPORT',
       DROP_FIRED: 'DROP_FIRED',
       AVAILABLE: 'AVAILABLE',
+      // checkout engine (content -> service worker)
+      CHECKOUT_PROGRESS: 'CHECKOUT_PROGRESS',
+      CHECKOUT_HANDOFF: 'CHECKOUT_HANDOFF',
+      CLAIM_PURCHASE: 'CLAIM_PURCHASE',
+      ORDER_PLACED: 'ORDER_PLACED',
+      // teach mode
+      TEACH_OPEN: 'TEACH_OPEN',   // popup -> service worker -> store tab
+      TEACH_SAVE: 'TEACH_SAVE',   // store tab -> service worker
+      TEACH_CLEAR: 'TEACH_CLEAR', // options -> service worker
     },
   });
 })();

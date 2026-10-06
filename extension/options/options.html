@@ -38,12 +38,7 @@
           <input id="productName" name="productName" type="text" maxlength="200" placeholder="e.g. Console X 1TB Edition" autocomplete="off">
           <div class="hint">Used for notifications and (later) Google Alerts.</div>
         </div>
-        <div class="field">
-          <label for="retailer">Retailer adapter</label>
-          <select id="retailer" name="retailer">
-            <option value="generic">Generic (you pick the buttons, in Phase 4)</option>
-          </select>
-        </div>
+        <p class="small"><strong>Store preset:</strong> <span id="presetName">—</span></p>
       </section>
 
       <section class="card">
@@ -100,11 +95,28 @@
             <span>Stop one click short: take me to the final "Place order" button and let me click it.</span>
           </label>
         </div>
+        <div id="autoBuyWarning" class="notice" hidden>
+          <strong>Ro-Bought will place the order by itself.</strong> It only does so when the order total is
+          at or below your max, the cart holds exactly one unit of this product, and it hasn't already clicked
+          "Place order" in this run. Do a dry run with "Stop one click short" ticked first.
+        </div>
         <div class="field">
           <label for="maxTotalPrice">Max order total</label>
           <input id="maxTotalPrice" name="maxTotalPrice" type="number" min="0" step="0.01" placeholder="e.g. 549.99">
-          <div class="hint">In the store's currency. The bot stops if the total is higher. Required if the bot places the order.</div>
+          <div class="hint">In the store's currency, including tax and shipping. The bot won't buy above it. Required if the bot places the order.</div>
         </div>
+        <p class="small muted">Before a drop: empty your cart, and make sure your account has a saved address and
+          payment method. Ro-Bought never types card details, passwords or codes.</p>
+      </section>
+
+      <section class="card" id="buttonsCard">
+        <h2>Buttons</h2>
+        <p class="small" id="buttonsIntro"></p>
+        <p class="small muted">To teach Ro-Bought the exact buttons, open the store in a tab, click the ⚡ icon →
+          <strong>Teach buttons</strong>, and pick each button on its page. Add something to your cart and go as far
+          as the final review page, but don't place the order. Taught buttons always win over the built-in ones.</p>
+        <ul id="taughtList" class="taught"></ul>
+        <p id="buttonsMsg" class="small" role="status"></p>
       </section>
 
       <div id="formErrors" class="notice danger" role="alert" hidden></div>

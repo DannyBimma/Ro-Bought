@@ -161,7 +161,7 @@ Each phase ends with a pause so you can review, change, and commit.
 - Test harness pulled forward from Phase 3: `tools/serve.mjs`, fixture pages in `tests/fixtures/`,
   and `tests/e2e/run.mjs` (Chrome for Testing over CDP, zero dependencies).
 
-### Phase 3 — Triggers ✅ (this commit)
+### Phase 3 — Triggers ✅
 - Arming goes straight to `waiting` (scheduled) or `watching` (restock).
 - **Scheduled drop:** a 2-minute pre-warning alarm (notify, then focus the tab), the never-early
   clock offset, precise fire, `DROP_FIRED` → `watching` with a burst window, and an early-live
@@ -190,16 +190,48 @@ Each phase ends with a pause so you can review, change, and commit.
   Drives 8 new e2e steps covering polite spacing, back-off, hand-off, price ceiling, reload
   fallback, clock skew and burst.
 
-### Phase 4 — Checkout engine
-- Generic selector adapter, "pick element" helper, stage machine across page loads
-  (product → cart → checkout → review → confirmation).
-- **Amazon and Nintendo presets.** Amazon covers the add-to-cart and buy box, cart, and
-  checkout/place-order pages. Nintendo covers the store product page, cart and checkout.
-  Nintendo account sign-in is a hand-off.
-- Cart guards (quantity 1, no other items), saved address/payment present, price ceiling.
-- Stop-one-click-short (highlight the button, focus, notify) **or** claim the purchase lock,
-  then place the order and verify the confirmation.
-- End-to-end rehearsal against the mock store.
+### Phase 4 — Checkout engine ✅ (this commit)
+- **Stage machine** (`content/checkout.js`): each page load classifies itself, checking in this
+  order: confirmation → product → interstitial → "added to cart" page → review (a Place order
+  button is visible) → cart → checkout step. It then takes exactly one step. Single-page checkouts
+  are followed in place (up to 8 steps per page). The engine gets one turn per page load plus one
+  per Resume, so a state update can never repeat a click.
+- **Finding buttons** (`content/finder.js`): taught selector (or its exact text) → retailer preset
+  → exact-phrase text match. Every click candidate must be visible, enabled, and pass the hard
+  **never-click** rules: "Buy now"/1-Click/turbo checkout, subscribe, free trial or Prime sign-up,
+  warranty/protection add-ons. These rules apply even to taught buttons.
+- **Guards before buying:**
+  - the cart has exactly one line of quantity 1 (Amazon also checks the ASIN);
+  - a product-page quantity picker is set to 1;
+  - address and payment aren't shown as missing;
+  - the order total is read (taught element → preset → "Order total" text) and is within the max.
+  Extra items or a quantity above 1 pause the run. The bot never removes items itself.
+- **Place order:** stop-one-click-short highlights the button (an overlay box; the page isn't
+  modified) and hands off, and the run completes when the confirmation appears. Auto-purchase
+  needs the **once-only purchase lock** from the service worker. The lock is checked again there
+  (auto-buy on, total within max, not already taken) and persisted *before* the click.
+  - With the lock taken, later page loads only watch for confirmation.
+  - No confirmation → hand-off, never a retry.
+  - Disarm or a Chrome restart after the lock → `aborted` (needs a Reset).
+- **Loop and time limits:** at most 3 entries per stage and 5 minutes per checkout, then pause.
+  Resume grants fresh attempts. Sold out at add-to-cart → back to `watching`.
+- **Presets:**
+  - **Amazon.com:** `#add-to-cart-button`; the cart at `/gp/cart/view.html` with
+    `data-asin`/`data-quantity` checks; proceed and continue buttons; Place-order IDs; the grand
+    total; `/gp/buy/thankyou`. A Prime interstitial or a duplicate-order page pauses.
+  - **Nintendo US:** cart at `/us/cart/`, everything else generic. Its sign-in on
+    `accounts.nintendo.com` pauses as off-site.
+  - Both are best-effort and unverified against the live sites, so do a dry run first.
+- **Teach mode** (`content/teach.js`): ⚡ → Teach buttons opens a panel on the store page with
+  Pick and Test per button. Pick swallows the page's pointer and click events in the capture
+  phase, so nothing is pressed. It refuses never-click buttons. Selectors prefer stable ids, test
+  ids and names over position paths. The options page lists and clears taught buttons. They're
+  kept when settings are re-saved and dropped if the store changes.
+- **Mock store checkout** plus 11 new e2e steps: one order exactly; over the max at review;
+  extra cart items → pause → fix → Resume → buy; a CAPTCHA at review; a failed Place order
+  clicked once and never retried; a sold-out race → re-watch → buy; a teach pick that doesn't
+  press the button; teach refusing "Buy now"; a taught button needed for unfamiliar wording;
+  the options page and popup rendering.
 
 ### Phase 5 — Alerts and polish
 - Google Alerts: build a good query, open `google.com/alerts` prefilled (the user confirms;

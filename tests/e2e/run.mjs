@@ -88,6 +88,8 @@ for (const [from, to] of [
   ['RESTOCK_INTERVAL_MIN: 20,', 'RESTOCK_INTERVAL_MIN: 2,'],
   ['BURST_INTERVAL_MIN: 2,', 'BURST_INTERVAL_MIN: 1,'],
   ['BURST_WINDOW_MIN: 10,', 'BURST_WINDOW_MIN: 3,'],
+  ['FIND_TIMEOUT_MS: 10_000,', 'FIND_TIMEOUT_MS: 3_000,'],
+  ['CONFIRM_TIMEOUT_MS: 30_000,', 'CONFIRM_TIMEOUT_MS: 3_000,'],
 ]) {
   assert.ok(constantsSrc.includes(from), `constants.js no longer contains "${from}"`);
   constantsSrc = constantsSrc.replace(from, to);
@@ -181,13 +183,55 @@ try {
     const s = await state();
     return pred(s) ? s : null;
   }, { what, timeout });
-  const go = (path) => sw(`const s = await readRunState(); await chrome.tabs.update(s.tabId, { url: ${JSON.stringify(path.startsWith('http') ? path : BASE + path)} }); return true;`);
+  // The run tab, or (between runs, after a reset) the active tab.
+  const TAB_ID_EXPR = 'const s = await readRunState(); const tabId = s.tabId ?? (await chrome.tabs.query({ active: true, lastFocusedWindow: true }))[0].id;';
+  const go = (path) => sw(`${TAB_ID_EXPR} await chrome.tabs.update(tabId, { url: ${JSON.stringify(path.startsWith('http') ? path : BASE + path)} }); return true;`);
+
+  async function runTabTarget() {
+    const url = await sw(`${TAB_ID_EXPR} const t = await chrome.tabs.get(tabId).catch(() => null); return t?.url || null;`);
+    const { targetInfos } = await cdp.send('Target.getTargets');
+    const pages = targetInfos.filter((t) => t.type === 'page');
+    return pages.find((t) => url && t.url === url) || pages.find((t) => t.url.startsWith(BASE));
+  }
+
+  async function withRunTab(fn) {
+    const target = await runTabTarget();
+    assert.ok(target, 'run tab target');
+    const { sessionId } = await cdp.send('Target.attachToTarget', { targetId: target.targetId, flatten: true });
+    try {
+      return await fn(sessionId);
+    } finally {
+      await cdp.send('Target.detachFromTarget', { sessionId }).catch(() => {});
+    }
+  }
+
+  async function mouseClick(sessionId, nodeId) {
+    await cdp.send('DOM.scrollIntoViewIfNeeded', { nodeId }, sessionId).catch(() => {});
+    const { model } = await cdp.send('DOM.getBoxModel', { nodeId }, sessionId);
+    const [x1, y1, , , x3, y3] = model.content;
+    for (const type of ['mouseMoved', 'mousePressed', 'mouseReleased']) {
+      await cdp.send('Input.dispatchMouseEvent', { type, x: (x1 + x3) / 2, y: (y1 + y3) / 2, button: 'left', clickCount: 1 }, sessionId);
+    }
+  }
+
+  /** A real (trusted) mouse click on a page element, like a user's. */
+  const clickInPage = (selector) => withRunTab(async (sessionId) => {
+    const { root } = await cdp.send('DOM.getDocument', { depth: 0 }, sessionId);
+    const { nodeId } = await cdp.send('DOM.querySelector', { nodeId: root.nodeId, selector }, sessionId);
+    assert.ok(nodeId, `page has ${selector}`);
+    await mouseClick(sessionId, nodeId);
+  });
+
+  const pageHas = (selector) => withRunTab(async (sessionId) => {
+    const { root } = await cdp.send('DOM.getDocument', { depth: 0 }, sessionId);
+    const { nodeId } = await cdp.send('DOM.querySelector', { nodeId: root.nodeId, selector }, sessionId);
+    return nodeId !== 0;
+  });
 
   /** Reads the in-page panel's text and buttons, piercing its closed shadow root. */
   async function panel() {
     const s = await state();
-    const { targetInfos } = await cdp.send('Target.getTargets');
-    const tabTarget = targetInfos.find((t) => t.type === 'page' && t.url.startsWith(BASE));
+    const tabTarget = await runTabTarget();
     if (!tabTarget) return null;
     const { sessionId } = await cdp.send('Target.attachToTarget', { targetId: tabTarget.targetId, flatten: true });
     try {
@@ -217,14 +261,11 @@ try {
     const p = await panel();
     const btn = p.buttons.find((b) => b.action === action);
     assert.ok(btn, `panel button "${action}" exists`);
-    const { model } = await cdp.send('DOM.getBoxModel', { nodeId: btn.nodeId }, p.sessionId);
-    const [x1, y1, , , x3, y3] = model.content;
-    const x = (x1 + x3) / 2;
-    const y = (y1 + y3) / 2;
-    for (const type of ['mousePressed', 'mouseReleased']) {
-      await cdp.send('Input.dispatchMouseEvent', { type, x, y, button: 'left', clickCount: 1 }, p.sessionId);
+    try {
+      await mouseClick(p.sessionId, btn.nodeId);
+    } finally {
+      await cdp.send('Target.detachFromTarget', { sessionId: p.sessionId }).catch(() => {});
     }
-    await cdp.send('Target.detachFromTarget', { sessionId: p.sessionId }).catch(() => {});
   }
 
   const results = [];
@@ -464,22 +505,39 @@ try {
     await waitUntil(async () => (await watchInfo())?.backoffLevel === 0, { what: 'back-off to reset' });
   });
 
-  await step('restock: in stock -> page reload confirms -> handed to you', async () => {
+  await step('restock: in stock -> confirmed on the page -> checkout runs -> stops one click short', async () => {
     const tIn = Date.now();
     store.set({ stock: 'in' });
-    const s = await waitState((x) => x.status === 'awaiting_user', 'hand-off', 10000);
-    assert.match(s.message, /In stock now/);
+    const s = await waitState((x) => x.status === 'awaiting_user', 'ready hand-off', 15000);
+    assert.equal(s.checkout.ready, true);
+    assert.match(s.message, /Ready: order total 529\.99/);
     const after = pageGets(tIn);
     const firstFetch = after.findIndex((r) => r.mode === 'cors');
     const firstNav = after.findIndex((r) => r.mode === 'navigate');
     assert.ok(firstFetch !== -1 && firstNav > firstFetch, `expected fetch then reload: ${after.map((r) => r.mode).join(',')}`);
+    const flow = store.requests((r) => r.t >= tIn && r.mode === 'navigate').map((r) => r.path);
+    for (const path of ['/store/cart/add', '/store/cart.html', '/store/checkout/address.html', '/store/checkout/payment.html', '/store/checkout/review.html']) {
+      assert.ok(flow.includes(path), `visited ${path}: ${flow.join(' > ')}`);
+    }
+    assert.equal(store.snapshot().orders, 0);
+    assert.deepEqual(store.snapshot().cart, [{ sku: 'console', qty: 1 }]);
     const p = await waitUntil(async () => {
       const r = await panel();
       if (r?.sessionId) await cdp.send('Target.detachFromTarget', { sessionId: r.sessionId }).catch(() => {});
-      return r?.texts?.includes('In stock — your turn') ? r : null;
-    }, { what: 'panel "In stock — your turn"' });
+      return r?.texts?.includes('Ready — your click') ? r : null;
+    }, { what: 'panel "Ready — your click"' });
     assert.ok(p.buttons.some((b) => b.action === 'disarm'));
-    await disarmRun();
+    assert.ok(await pageHas('robought-highlight'), 'the Place order button is highlighted');
+    console.log(`      in stock -> ready at the final click: ${s.events.at(-1).t - tIn} ms`);
+  });
+
+  await step('the user clicks "Place your order" -> run completes; no new run until reset', async () => {
+    await clickInPage('#place-order');
+    const s = await waitState((x) => x.status === 'completed', 'completed', 10000);
+    assert.match(s.message, /Order placed/);
+    assert.equal(store.snapshot().orders, 1);
+    assert.match((await sw('return await arm();')).error, /Reset for a new run/);
+    assert.deepEqual(await sw('return await reset();'), { ok: true });
   });
 
   await step('price ceiling: in stock above the max keeps watching; a lower price hands off', async () => {
@@ -549,6 +607,238 @@ try {
     console.log(`      handed off ${lag} ms after the store went live`);
     assert.ok(lag >= 0 && lag < 2500, `handed off ${lag} ms after the store went live`);
     await disarmRun();
+  });
+
+  // -------------------------------------------------------------------------
+  // Phase 4: checkout, against the mock store
+  // -------------------------------------------------------------------------
+
+  const placeRequests = (since = 0) => store.requests((r) => r.t >= since && r.path === '/store/checkout/place').length;
+  const AUTO = { stopBeforePlaceOrder: false, maxTotalPrice: 600 };
+  const armAndRestock = async (cfg) => {
+    await configure(cfg);
+    await armRun('watching');
+    const t = Date.now();
+    store.set({ stock: 'in' });
+    return t;
+  };
+
+  await step('auto-purchase: places exactly one order, within the max price', async () => {
+    store.reset();
+    const t0 = await armAndRestock(AUTO);
+    const s = await waitState((x) => x.status === 'completed', 'order placed', 20000);
+    assert.equal(store.snapshot().orders, 1);
+    assert.equal(placeRequests(t0), 1);
+    assert.equal(store.orders()[0].total, 529.99);
+    assert.deepEqual(store.orders()[0].items.map((l) => [l.sku, l.qty]), [['console', 1]]);
+    assert.equal(s.purchaseLock.total, 529.99);
+    assert.match(s.message, /Order placed \(total 529\.99\)/);
+    assert.equal(store.requests((r) => r.path === '/store/buy-now').length, 0, 'never pressed "Buy now"');
+    console.log(`      in stock -> order placed: ${s.updatedAt - t0} ms`);
+    assert.match((await sw('return await arm();')).error, /Reset for a new run/);
+    assert.deepEqual(await sw('return await reset();'), { ok: true });
+  });
+
+  await step('total above the max at the final review: not bought, handed to you', async () => {
+    store.reset();
+    const t0 = await armAndRestock({ stopBeforePlaceOrder: false, maxTotalPrice: 520 }); // item 499.99 + tax 30
+    const s = await waitState((x) => x.status === 'awaiting_user', 'hand-off', 20000);
+    assert.match(s.message, /above your max of 520\.00/);
+    assert.equal(s.purchaseLock, null);
+    assert.equal(placeRequests(t0), 0);
+    assert.equal(store.snapshot().orders, 0);
+    await disarmRun();
+  });
+
+  await step('other items in the cart: pauses; after you fix it, Resume finishes the purchase', async () => {
+    store.reset();
+    store.set({ extraItem: true });
+    const t0 = await armAndRestock(AUTO);
+    const s = await waitState((x) => x.status === 'paused', 'pause', 20000);
+    assert.equal(s.pause.kind, 'checkout');
+    assert.match(s.pause.label, /other items/);
+    assert.equal(placeRequests(t0), 0);
+    // The user empties the cart (the page reloads), then resumes.
+    store.reset();
+    store.set({ stock: 'in' });
+    await go('/store/cart.html');
+    await sleep(800);
+    assert.deepEqual(await sw('return await resume();'), { ok: true });
+    await waitState((x) => x.status === 'completed', 'order placed', 20000);
+    assert.equal(store.snapshot().orders, 1);
+    assert.deepEqual(store.orders()[0].items.map((l) => [l.sku, l.qty]), [['console', 1]]);
+    assert.deepEqual(await sw('return await reset();'), { ok: true });
+  });
+
+  await step('a CAPTCHA at the final review pauses before anything is bought', async () => {
+    store.reset();
+    store.set({ reviewCaptcha: true });
+    const t0 = await armAndRestock(AUTO);
+    const s = await waitState((x) => x.status === 'paused', 'pause', 20000);
+    assert.equal(s.pause.kind, 'challenge');
+    await sleep(1500);
+    assert.equal(placeRequests(t0), 0);
+    assert.equal((await state()).purchaseLock, null);
+    await disarmRun();
+  });
+
+  await step('"Place order" fails: clicked exactly once, never retried, handed to you', async () => {
+    store.reset();
+    store.set({ placeFails: true });
+    const t0 = await armAndRestock(AUTO);
+    const s = await waitState((x) => x.status === 'awaiting_user', 'hand-off', 25000);
+    assert.match(s.message, /clicked "Place order" once and will not click it again/);
+    assert.ok(s.purchaseLock);
+    await sleep(1500);
+    assert.equal(placeRequests(t0), 1);
+    assert.equal(store.snapshot().orders, 0);
+    // Disarming after the lock ends the run for good.
+    await sw('return await disarm();');
+    const after = await state();
+    assert.equal(after.status, 'aborted');
+    assert.deepEqual(await sw('return await reset();'), { ok: true });
+  });
+
+  await step('sold out at add-to-cart: back to watching, then buys on the next restock', async () => {
+    store.reset();
+    store.set({ addFails: true });
+    const t0 = await armAndRestock(AUTO);
+    await waitState((x) => x.events.some((e) => e.t >= t0 && /sold out again/.test(e.text)), 'back to watching', 20000);
+    assert.equal((await state()).status, 'watching');
+    store.set({ stock: 'in' });
+    await waitState((x) => x.status === 'completed', 'order placed', 25000);
+    assert.equal(store.snapshot().orders, 1);
+    assert.deepEqual(await sw('return await reset();'), { ok: true });
+  });
+
+  await step('teach mode: picking "Place your order" saves it without pressing it', async () => {
+    store.reset();
+    store.set({ stock: 'in' });
+    await configure({});
+    // Fill the cart server-side and open the review page in the (idle) store tab.
+    await fetch(`${BASE}/store/cart/add?sku=console`, { redirect: 'manual' });
+    await go('/store/checkout/review.html');
+    await waitUntil(() => pageHas('#place-order'), { what: 'review page' });
+    assert.deepEqual(await sw('return await teachOpen();'), { ok: true });
+    await waitUntil(async () => {
+      const r = await panel();
+      if (r?.sessionId) await cdp.send('Target.detachFromTarget', { sessionId: r.sessionId }).catch(() => {});
+      return r?.buttons?.some((b) => b.action === 'pick:placeOrder') ? r : null;
+    }, { what: 'teach panel' });
+    const t0 = Date.now();
+    await clickPanelButton('pick:placeOrder');
+    await sleep(200);
+    await clickInPage('#place-order');
+    const saved = await waitUntil(async () => {
+      const cfg = await sw("return (await chrome.storage.local.get('config')).config;");
+      return cfg.selectors?.placeOrder || null;
+    }, { what: 'taught selector' });
+    assert.deepEqual(saved, { selector: '#place-order', label: 'Place your order' });
+    await sleep(800);
+    assert.equal(placeRequests(t0), 0, 'picking must not press the button');
+    assert.equal(store.snapshot().orders, 0);
+
+    await clickPanelButton('test:placeOrder');
+    await waitUntil(() => pageHas('robought-highlight'), { what: 'test highlight' });
+    await clickPanelButton('done');
+    await waitUntil(async () => {
+      const r = await panel();
+      if (r?.sessionId) await cdp.send('Target.detachFromTarget', { sessionId: r.sessionId }).catch(() => {});
+      return r && !r.present;
+    }, { what: 'teach panel to close' });
+  });
+
+  await step('teach mode refuses to learn an instant-buy ("Buy now") button', async () => {
+    store.reset();
+    store.set({ stock: 'in' });
+    await go('/store/product.html');
+    await waitUntil(() => pageHas('#buy-now-button'), { what: 'product page' });
+    assert.deepEqual(await sw('return await teachOpen();'), { ok: true });
+    await waitUntil(async () => {
+      const r = await panel();
+      if (r?.sessionId) await cdp.send('Target.detachFromTarget', { sessionId: r.sessionId }).catch(() => {});
+      return r?.buttons?.some((b) => b.action === 'pick:addToCart') ? r : null;
+    }, { what: 'teach panel' });
+    await clickPanelButton('pick:addToCart');
+    await sleep(200);
+    await clickInPage('#buy-now-button');
+    const p = await waitUntil(async () => {
+      const r = await panel();
+      if (r?.sessionId) await cdp.send('Target.detachFromTarget', { sessionId: r.sessionId }).catch(() => {});
+      return r?.texts?.some((t) => /never clicks/.test(t)) ? r : null;
+    }, { what: 'refusal note' });
+    assert.ok(p);
+    const cfg = await sw("return (await chrome.storage.local.get('config')).config;");
+    assert.equal(cfg.selectors.addToCart, null);
+    assert.equal(store.requests((r) => r.path === '/store/buy-now').length, 0);
+    await clickPanelButton('done');
+  });
+
+  await step('a taught button is used when the store wording does not match the built-in phrases', async () => {
+    const taught = (await sw("return (await chrome.storage.local.get('config')).config;")).selectors;
+    assert.equal(taught.placeOrder.selector, '#place-order');
+
+    // Without the taught button, "Finish" isn't recognised as Place order: the run pauses.
+    store.reset();
+    store.set({ placeLabel: 'Finish' });
+    let t0 = await armAndRestock({ ...AUTO, selectors: { placeOrder: null } });
+    let s = await waitState((x) => x.status === 'paused', 'pause without the taught button', 25000);
+    assert.equal(s.pause.kind, 'checkout');
+    assert.equal(placeRequests(t0), 0);
+    await disarmRun();
+
+    // With it, the same store completes.
+    store.reset();
+    store.set({ placeLabel: 'Finish' });
+    t0 = await armAndRestock({ ...AUTO, selectors: taught });
+    s = await waitState((x) => x.status === 'completed', 'order placed', 20000);
+    assert.equal(placeRequests(t0), 1);
+    assert.equal(store.snapshot().orders, 1);
+    assert.deepEqual(await sw('return await reset();'), { ok: true });
+  });
+
+  await step('options page and popup render (taught buttons listed, no script errors)', async () => {
+    // Not new URL(...).origin: Node reports "null" as the origin of chrome-extension:// URLs.
+    const extOrigin = swTarget.url.split('/').slice(0, 3).join('/');
+    const check = async (path, expression) => {
+      const url = `${extOrigin}/${path}`;
+      // Chrome opened an options tab at install; attach to the one we open now.
+      const before = new Set((await cdp.send('Target.getTargets')).targetInfos.map((t) => t.targetId));
+      const tabId = await sw(`return (await chrome.tabs.create({ url: ${JSON.stringify(url)}, active: false })).id;`);
+      try {
+        const target = await waitUntil(async () => {
+          const { targetInfos } = await cdp.send('Target.getTargets');
+          return targetInfos.find((t) => t.type === 'page' && t.url === url && !before.has(t.targetId)) || null;
+        }, { what: `${path} to open` });
+        const { sessionId } = await cdp.send('Target.attachToTarget', { targetId: target.targetId, flatten: true });
+        try {
+          return await waitUntil(async () => {
+            const { result, exceptionDetails } = await cdp.send('Runtime.evaluate', { expression, returnByValue: true }, sessionId);
+            if (exceptionDetails) return null;
+            return result.value || null;
+          }, { what: path });
+        } finally {
+          await cdp.send('Target.detachFromTarget', { sessionId }).catch(() => {});
+        }
+      } finally {
+        await sw(`await chrome.tabs.remove(${tabId}); return true;`).catch(() => {});
+      }
+    };
+    const options = await check('options/options.html', `(() => {
+      const items = [...document.querySelectorAll('#taughtList li')].map((li) => li.textContent);
+      if (!items.length || !document.getElementById('productUrl').value) return null;
+      return { items, preset: document.getElementById('presetName').textContent, url: document.getElementById('productUrl').value };
+    })()`);
+    assert.ok(options.items.some((t) => t.includes('#place-order')), options.items.join(' | '));
+    assert.match(options.preset, /Generic store/);
+    assert.equal(options.url, STORE_PRODUCT);
+
+    const popup = await check('popup/popup.html', `(() => {
+      const pill = document.getElementById('statusPill').textContent;
+      return pill && pill !== '…' ? { pill, product: document.getElementById('sumHost').textContent } : null;
+    })()`);
+    assert.equal(popup.pill, 'Off');
+    assert.equal(popup.product, 'localhost');
   });
 
   await step('no errors logged by the service worker', async () => {

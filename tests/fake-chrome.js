@@ -48,7 +48,7 @@ function createFakeChrome({ extensionId = 'testextensionid' } = {}) {
   const tabs = new Map();
   const alarms = new Map();
   let nextTabId = 1;
-  const calls = { keepAwake: [], badge: [], notifications: [], cleared: [], focused: [], reloaded: [], openOptions: 0 };
+  const calls = { keepAwake: [], badge: [], notifications: [], cleared: [], focused: [], reloaded: [], tabMessages: [], openOptions: 0 };
 
   const onChanged = event();
   const local = storageArea('local', onChanged);
@@ -103,6 +103,12 @@ function createFakeChrome({ extensionId = 'testextensionid' } = {}) {
     async remove(id) {
       tabs.delete(id);
       await tabsApi.onRemoved.dispatch(id, { windowId: 1, isWindowClosing: false });
+    },
+    sendMessageReply: { ok: true },
+    async sendMessage(tabId, msg) {
+      calls.tabMessages.push({ tabId, msg });
+      if (!tabs.has(tabId)) throw new Error('Could not establish connection.');
+      return tabsApi.sendMessageReply;
     },
   };
 

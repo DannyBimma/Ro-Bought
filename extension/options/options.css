@@ -5,3 +5,8 @@ main {
 }
 header { margin-bottom: 16px; }
 .actions { display: flex; gap: 12px; align-items: center; margin-top: 8px; }
+.taught { list-style: none; margin: 8px 0 0; padding: 0; }
+.taught li { display: flex; gap: 8px; align-items: center; padding: 6px 0; border-top: 1px solid var(--border); }
+.taught li .what { flex: 1; min-width: 0; }
+.taught code { font-size: 12px; overflow-wrap: anywhere; color: var(--muted); }
+.taught button { padding: 3px 10px; font-size: 12px; }

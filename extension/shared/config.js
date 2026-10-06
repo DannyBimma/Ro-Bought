@@ -21,7 +21,44 @@
       burstWindowSec: LIMITS.BURST_WINDOW_DEFAULT,
       stopBeforePlaceOrder: true,
       maxTotalPrice: null,
+      selectors: emptySelectors(), // buttons the user taught (override the presets)
     };
+  }
+
+  const SELECTOR_MAX = 500;
+  const LABEL_MAX = 80;
+
+  function emptySelectors() {
+    const out = {};
+    for (const f of RoBought.constants.TEACH_FIELDS) out[f.id] = f.multi ? [] : null;
+    return out;
+  }
+
+  /**
+   * One taught button: { selector, label }. The selector may be empty when only the button's
+   * exact text is reliable. Anything malformed is dropped.
+   */
+  function cleanTaught(v) {
+    if (!v || typeof v !== 'object') return null;
+    const selector = typeof v.selector === 'string' ? v.selector.trim() : '';
+    if (selector.length > SELECTOR_MAX || /[\u0000-\u001f]/.test(selector)) return null;
+    const label = typeof v.label === 'string' ? v.label.replace(/[\u0000-\u001f\u007f]/g, ' ').trim().slice(0, LABEL_MAX) : '';
+    if (!selector && !label) return null;
+    return { selector, label };
+  }
+
+  function cleanSelectors(raw) {
+    const out = emptySelectors();
+    if (!raw || typeof raw !== 'object') return out;
+    for (const f of RoBought.constants.TEACH_FIELDS) {
+      if (f.multi) {
+        const list = Array.isArray(raw[f.id]) ? raw[f.id] : [];
+        out[f.id] = list.map(cleanTaught).filter(Boolean).slice(0, RoBought.constants.MAX_CONTINUE_SELECTORS);
+      } else {
+        out[f.id] = cleanTaught(raw[f.id]);
+      }
+    }
+    return out;
   }
 
   const isPlainObject = (v) =>
@@ -122,6 +159,9 @@
       warnings.push('No max total price set — consider adding one as a safety net.');
     }
 
+    // Taught buttons: malformed entries are dropped, never an error.
+    config.selectors = cleanSelectors(input.selectors);
+
     return { ok: errors.length === 0, config, errors, warnings };
   }
 
@@ -142,5 +182,5 @@
     return problems;
   }
 
-  RoBought.config = Object.freeze({ RETAILERS, defaults, validate, armProblems });
+  RoBought.config = Object.freeze({ RETAILERS, defaults, validate, armProblems, cleanSelectors, cleanTaught, emptySelectors });
 })();

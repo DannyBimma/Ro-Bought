@@ -5,9 +5,9 @@ It watches **one product** from **one retailer** at any given time. The moment t
 the retailer's normal checkout in the user's own **logged-in session**, faster than you could
 click. It buys **one unit, once**, and then stops.
 
-> **Status:** Phase 3 of 5. Safety core, page guards, and both triggers (scheduled drop and
-> restock watch). When the product can be bought, Ro-Bought currently hands the checkout to you
-> with a loud notification. Automatic checkout arrives in Phase 4. See [docs/PLAN.md](docs/PLAN.md).
+> **Status:** Phase 4 of 5. Safety core, page guards, both triggers, and the checkout engine
+> (presets for Amazon.com and Nintendo's US store, plus "Teach buttons" for any store). Google Alerts
+> and final polish come in Phase 5. See [docs/PLAN.md](docs/PLAN.md).
 
 ## Install (unpacked)
 
@@ -33,14 +33,48 @@ After pulling new code, click the reload icon on the extension card in `chrome:/
   to the restock interval. A notification two minutes before the drop brings the tab to the front.
 - **Max price:** if the product is in stock above your max, Ro-Bought keeps watching instead.
 
+## How checkout works
+
+When the product can be bought, Ro-Bought clicks through the store's normal checkout:
+**Add to cart → cart → checkout steps ("Use this address", "Use this payment method", …) → final review.**
+
+- **Stop one click short (the default):** at the final review it highlights the **Place order** button
+  and hands over to you. When the confirmation page appears, the run finishes.
+- **Automatic purchase (opt-in, needs a max price):** it clicks **Place order** only if all of
+  these hold:
+  - the order total is shown and is at or below your max;
+  - the cart holds exactly this one product, quantity 1;
+  - it hasn't already clicked Place order in this run.
+
+  That last check is a once-only lock, saved before the click, so a reload, crash or restart can
+  never cause a second order. If the order doesn't confirm, it hands over to you and does not retry.
+- **What it never does:** type anything (cards, passwords, codes), click "Buy now" / 1-Click, accept
+  upsells, trials or warranties, or remove items from your cart. Anything unexpected pauses
+  (fix it and click **Resume**) or hands the purchase to you.
+- If the item sells out again between "in stock" and "add to cart", it goes back to watching.
+
+### Store presets and "Teach buttons"
+
+- **Amazon.com** and **Nintendo's US store** (`nintendo.com/us/store`) have built-in presets. They're
+  written from these stores' known page structure but haven't been checked against the live sites, so
+  **do a dry run first** with "Stop one click short" ticked.
+- For **any store** (and to make the presets exact), teach Ro-Bought the real buttons:
+  1. Open the store in a tab, click ⚡ → **Teach buttons**.
+  2. Click **Pick** next to a button, then click that button on the page. Ro-Bought remembers it,
+     and nothing on the page is pressed while picking.
+  3. Add the product to your cart and walk through checkout to the final review page, picking each
+     button on the way. **Don't place the order.** **Test** shows what Ro-Bought would click.
+
+  Taught buttons always win over the presets. Clear them in the options.
+
 ## What users must do during a drop
 
 - Keep **Chrome open** and the retailer tab **in the foreground**. Chrome slows down timers in
   background tabs.
 - Keep the computer **awake and plugged in**. The extension asks the OS to keep the display awake
   while armed, but it can't stop a closed lid or a manual sleep.
-- Be **signed in** to the retailer with a **saved address and payment method**. Extensions can't
-  read Chrome's saved cards, by design.
+- Be **signed in** to the retailer with a **saved address and payment method**, and **empty your
+  cart** beforehand. Extensions can't read Chrome's saved cards, by design.
 - If a CAPTCHA, "press and hold" check, queue/waiting room, sign-in or card-details prompt
   appears, or the tab leaves the store's site, the bot **pauses and hands control to you**. It never
   tries to get around these. Deal with it yourself, then click **Resume** in the ⚡ panel in the
@@ -73,7 +107,8 @@ APIs (`tests/fake-chrome.js`). Node 22+ is required.
 
 ### Rehearsing a drop with the mock store
 
-`npm run serve` also runs a fake store whose stock you control from a browser tab:
+`npm run serve` also runs a fake store, with a full checkout (cart → address → payment → review →
+"Place your order" → thank-you page), whose behaviour you control from a browser tab:
 
 1. In the options, set the product URL to `http://localhost:8080/store/product.html`
    (or `/store/spa.html` for a client-rendered store), save, and arm.
@@ -83,7 +118,15 @@ APIs (`tests/fake-chrome.js`). Node 22+ is required.
    Add `&skewMs=3000` to give the store a clock 3 s ahead of yours.
 4. Polite back-off: `http://localhost:8080/__control?fail=429:2:30` makes the next two checks
    answer "too many requests, retry in 30 s".
-5. `http://localhost:8080/__control/log` lists the requests the store received.
+5. Checkout trouble, one switch at a time (add to `/__control?`):
+   - `extraItem=1`: another item is already in the cart.
+   - `reviewCaptcha=1`: a "press & hold" check on the final review.
+   - `placeFails=1`: "Place order" fails.
+   - `addFails=1`: sold out at add-to-cart.
+   - `placeLabel=Finish`: the final button has wording only a taught button matches.
+   - `reset=1`: start over.
+6. `http://localhost:8080/__control` shows the store state, including the cart and how many orders were
+   placed. `http://localhost:8080/__control/log` lists the requests the store received.
 
 ### End-to-end tests
 
