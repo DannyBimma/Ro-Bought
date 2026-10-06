@@ -17,6 +17,7 @@
       // chrome.storage.session (service worker only — never exposed to content scripts)
       PRESENCE: 'presence',
       NOTICES: 'notices',
+      WATCH: 'watch', // watcher telemetry + memory that must survive page reloads
     },
 
     CONTENT_SCRIPT_ID: 'robought-retailer',
@@ -26,13 +27,20 @@
       'shared/constants.js',
       'shared/url-utils.js',
       'shared/ticket-guard.js',
+      'shared/timing.js',
+      'shared/availability.js',
       'content/dom.js',
       'content/guards.js',
+      'content/adapters.js',
+      'content/stock.js',
+      'content/clock.js',
+      'content/watcher.js',
       'content/overlay.js',
       'content/main.js',
     ],
 
     WATCHDOG_ALARM: 'robought-watchdog',
+    PREWARN_ALARM: 'robought-prewarn',
     HEARTBEAT_MS: 30_000,
     STALE_AFTER_MS: 100_000,
     HIDDEN_NOTICE_COOLDOWN_MS: 60_000,
@@ -113,6 +121,22 @@
     EVENT_LOG_MAX: 50,
     PREWARN_MINUTES: 2,
 
+    // Watcher tuning (milliseconds).
+    WATCH: {
+      FETCH_TIMEOUT_MS: 15_000,
+      MAX_HTML_CHARS: 8_000_000,      // ignore absurdly large responses
+      CLOCK_CHECK_LEAD_MS: 60_000,    // measure the store's clock this long before a drop
+      CLOCK_CHECK_MIN_LEAD_MS: 8_000, // ...but not if the drop is closer than this
+      CLOCK_SAMPLES: 5,
+      CLOCK_SAMPLE_GAP_MS: 1_200,     // not a whole second, so samples land at different sub-second phases
+      PRECISE_WINDOW_MS: 1_500,       // switch from coarse timers to frame/macrotask timing
+      COARSE_CHUNK_MS: 30_000,        // long waits are chunked so sleep/clock changes are corrected
+      UNREADABLE_NOTICE_AFTER: 3,     // consecutive "can't tell" checks before telling the user
+    },
+
+    // Last-check outcomes reported by the watcher.
+    WATCH_RESULTS: ['in_stock', 'out_of_stock', 'unknown', 'over_price', 'error', 'blocked', 'backoff'],
+
     MESSAGES: {
       // popup / options -> service worker
       GET_STATUS: 'GET_STATUS',
@@ -126,6 +150,9 @@
       CONTENT_HELLO: 'CONTENT_HELLO',
       GUARD_STATUS: 'GUARD_STATUS',
       PRESENCE: 'PRESENCE',
+      WATCH_REPORT: 'WATCH_REPORT',
+      DROP_FIRED: 'DROP_FIRED',
+      AVAILABLE: 'AVAILABLE',
     },
   });
 })();

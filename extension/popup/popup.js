@@ -8,6 +8,7 @@
   const $ = (id) => document.getElementById(id);
 
   let ticketReason = null;
+  let latest = null; // last GET_STATUS result, re-rendered by the 1 s ticker
 
   function send(type) {
     return chrome.runtime.sendMessage({ type });
@@ -59,6 +60,41 @@
     $('reset').hidden = !terminal;
 
     renderEvents(state.events || []);
+    renderWatchLine();
+  }
+
+  function duration(ms) {
+    const s = Math.max(0, Math.round(ms / 1000));
+    const d = Math.floor(s / 86400);
+    const h = Math.floor((s % 86400) / 3600);
+    const m = Math.floor((s % 3600) / 60);
+    if (d) return `${d}d ${h}h`;
+    if (h) return `${h}h ${m}m`;
+    if (m) return `${m}m ${s % 60}s`;
+    return `${s}s`;
+  }
+
+  /** One live line: the countdown to a drop, or what the last restock check found. */
+  function renderWatchLine() {
+    const line = $('watchLine');
+    if (!latest) return;
+    const { state, config, watch } = latest;
+    const now = Date.now();
+    let text = '';
+    if (state.status === RUN_STATUS.WAITING && config?.dropTime) {
+      text = `Drop in ${duration(config.dropTime - now)}`;
+      const offset = watch?.clockOffsetMs ?? 0;
+      if (Math.abs(offset) >= 500) text += ` · store clock ${offset > 0 ? '+' : ''}${(offset / 1000).toFixed(1)}s`;
+    } else if (state.status === RUN_STATUS.WATCHING && watch) {
+      const parts = [];
+      if (watch.lastCheckAt) parts.push(`Checked ${duration(now - watch.lastCheckAt)} ago${watch.lastDetail ? `: ${watch.lastDetail}` : ''}`);
+      if (watch.backoffUntil > now) parts.push(`backing off ${duration(watch.backoffUntil - now)}`);
+      else if (watch.nextCheckAt > now) parts.push(`next in ~${duration(watch.nextCheckAt - now)}`);
+      parts.push(watch.method === 'reload' ? 'by reloading the page' : 'via page source');
+      text = parts.join(' · ');
+    }
+    line.textContent = text;
+    line.hidden = !text;
   }
 
   function renderEvents(events) {
@@ -83,8 +119,12 @@
 
   async function refresh() {
     const res = await send(MESSAGES.GET_STATUS);
-    if (res?.ok) render(res);
-    else showError(res?.error || 'Could not reach the extension.');
+    if (res?.ok) {
+      latest = res;
+      render(res);
+    } else {
+      showError(res?.error || 'Could not reach the extension.');
+    }
   }
 
   async function command(type) {
@@ -118,7 +158,10 @@
 
   chrome.storage.onChanged.addListener((changes, area) => {
     if (area === 'local' && (changes[STORAGE_KEYS.RUN_STATE] || changes[STORAGE_KEYS.CONFIG])) refresh();
+    if (area === 'session' && changes[STORAGE_KEYS.WATCH]) refresh();
   });
+  // The popup only lives while it's open, so a 1 s ticker for the countdown is cheap.
+  setInterval(renderWatchLine, 1000);
 
   checkActiveTab()
     .catch(() => {})

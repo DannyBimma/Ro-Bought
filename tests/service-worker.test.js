@@ -21,7 +21,7 @@ globalThis.importScripts = (...paths) => {
 const swPath = join(EXT, 'background', 'service-worker.js');
 vm.runInThisContext(readFileSync(swPath, 'utf8'), { filename: swPath });
 
-const { STORAGE_KEYS, MESSAGES, WATCHDOG_ALARM } = globalThis.RoBought.constants;
+const { STORAGE_KEYS, MESSAGES, WATCHDOG_ALARM, PREWARN_ALARM } = globalThis.RoBought.constants;
 const PRODUCT = 'https://www.example-store.com/product/123';
 const PATTERNS = ['https://example-store.com/*', 'https://www.example-store.com/*'];
 
@@ -43,7 +43,7 @@ async function saveConfig(over = {}) {
 
 async function armFresh() {
   if (['completed', 'aborted', 'error'].includes(runState()?.status)) await send(MESSAGES.RESET);
-  if (['armed', 'paused', 'watching', 'waiting'].includes(runState()?.status)) await send(MESSAGES.DISARM);
+  if (['paused', 'watching', 'waiting', 'awaiting_user'].includes(runState()?.status)) await send(MESSAGES.DISARM);
   const res = await send(MESSAGES.ARM);
   assert.deepEqual(res, { ok: true });
   await settle();
@@ -64,7 +64,7 @@ test('refuses to arm without config or without site access', async () => {
 test('arms: scoped content script, pinned tab, keep-awake, watchdog alarm', async () => {
   fake.granted.add(PATTERNS[1]);
   await armFresh();
-  assert.equal(runState().status, 'armed');
+  assert.equal(runState().status, 'watching');
   assert.ok(runState().runId);
 
   const reg = fake.registered.get('robought-retailer');
@@ -94,7 +94,7 @@ test('rejects page-only commands from content and content from other sites', asy
   assert.match((await send(MESSAGES.RESET, content(runTab()))).error, /not allowed/);
   const evil = await send(MESSAGES.GUARD_STATUS, content(runTab(), 'https://evil.example.net/x'), { guard: captcha });
   assert.match(evil.error, /not allowed/);
-  assert.equal(runState().status, 'armed');
+  assert.equal(runState().status, 'watching');
 });
 
 test('accepts the bare-domain variant of the retailer (amazon.com vs www.amazon.com)', async () => {
@@ -106,14 +106,17 @@ test('accepts the bare-domain variant of the retailer (amazon.com vs www.amazon.
 test('another tab on the same site cannot take over or pause the run', async () => {
   const other = await fake.chrome.tabs.create({ url: `${PRODUCT}?other`, active: false });
   const hello = await send(MESSAGES.CONTENT_HELLO, content(other.id), { ticketReason: null });
-  assert.deepEqual(hello, { ok: true, tabId: other.id });
+  assert.equal(hello.ok, true);
+  assert.equal(hello.tabId, other.id);
+  assert.equal(hello.config.productUrl, PRODUCT); // settings, so it could take over later
+  assert.equal(hello.watch, null);                // but no run memory
   assert.notEqual(runTab(), other.id);
 
   const guard = await send(MESSAGES.GUARD_STATUS, content(other.id), { guard: captcha });
   assert.match(guard.error, /Not the run tab/);
   const resume = await send(MESSAGES.DISARM, content(other.id));
   assert.match(resume.error, /Not the run tab/);
-  assert.equal(runState().status, 'armed');
+  assert.equal(runState().status, 'watching');
 });
 
 // ---------------------------------------------------------------------------
@@ -128,7 +131,7 @@ test('an on-page CAPTCHA pauses the run, notifies and focuses the tab', async ()
   const s = runState();
   assert.equal(s.status, 'paused');
   assert.equal(s.pause.kind, 'captcha');
-  assert.equal(s.pause.from, 'armed');
+  assert.equal(s.pause.from, 'watching');
   assert.equal(s.pause.cleared, false);
   assert.equal(notified('paused').at(-1).requireInteraction, true);
   assert.match(notified('paused').at(-1).message, /never solves CAPTCHAs/);
@@ -152,7 +155,7 @@ test('guard gone -> "looks clear"; Resume continues with no acknowledgement', as
   assert.equal(runState().pause.cleared, true);
 
   assert.deepEqual(await send(MESSAGES.RESUME), { ok: true });
-  assert.equal(runState().status, 'armed');
+  assert.equal(runState().status, 'watching');
   assert.equal(runState().ackSignature, null);
   assert.equal(runState().pause, null);
 });
@@ -161,13 +164,13 @@ test('"Resume anyway" acknowledges that exact guard only', async () => {
   await send(MESSAGES.GUARD_STATUS, content(runTab()), { guard: captcha });
   assert.equal(runState().status, 'paused');
   assert.deepEqual(await send(MESSAGES.RESUME, content(runTab())), { ok: true }); // from the in-page panel
-  assert.equal(runState().status, 'armed');
+  assert.equal(runState().status, 'watching');
   assert.equal(runState().ackSignature, captcha.signature);
 
   // Same guard again: ignored.
   const again = await send(MESSAGES.GUARD_STATUS, content(runTab()), { guard: captcha });
   assert.equal(again.ignored, true);
-  assert.equal(runState().status, 'armed');
+  assert.equal(runState().status, 'watching');
 
   // A different guard still pauses.
   const queue = { kind: 'queue', label: 'A queue or waiting room is showing', signature: 'queue:queue-text:/' };
@@ -181,7 +184,7 @@ test('"Resume anyway" acknowledges that exact guard only', async () => {
 test('rejects malformed guard reports', async () => {
   const res = await send(MESSAGES.GUARD_STATUS, content(runTab()), { guard: { kind: 'solve-it', label: 'x' } });
   assert.match(res.error, /Invalid guard/);
-  assert.equal(runState().status, 'armed');
+  assert.equal(runState().status, 'watching');
 });
 
 test('resume with nothing paused is refused', async () => {
@@ -207,7 +210,7 @@ test('leaving the retailer site (queue, sign-in, payment page) pauses; returning
   await send(MESSAGES.GUARD_STATUS, content(id), { guard: null });
   assert.equal(runState().pause.cleared, true);
   await send(MESSAGES.RESUME);
-  assert.equal(runState().status, 'armed');
+  assert.equal(runState().status, 'watching');
   assert.equal(runState().ackSignature, null); // tab-level pauses are never acknowledged
 });
 
@@ -217,7 +220,7 @@ test('in-site navigation and other tabs do not pause', async () => {
   await fake.chrome.tabs.onUpdated.dispatch(id + 100, { status: 'complete' }, { id: id + 100 });
   await fake.chrome.tabs.onUpdated.dispatch(id, { title: 'x' }, { id });
   await settle();
-  assert.equal(runState().status, 'armed');
+  assert.equal(runState().status, 'watching');
 });
 
 test('closing the retailer tab pauses; Resume reopens it', async () => {
@@ -234,7 +237,7 @@ test('closing the retailer tab pauses; Resume reopens it', async () => {
 
   assert.deepEqual(await send(MESSAGES.RESUME), { ok: true });
   await settle();
-  assert.equal(runState().status, 'armed');
+  assert.equal(runState().status, 'watching');
   assert.notEqual(runTab(), oldId);
   assert.equal(fake.tabs.get(runTab()).url, PRODUCT);
 });
@@ -247,7 +250,7 @@ test('a discarded tab pauses; Resume reloads it', async () => {
   assert.equal(runState().pause.kind, 'discarded');
   await send(MESSAGES.RESUME);
   assert.ok(fake.calls.reloaded.includes(id));
-  assert.equal(runState().status, 'armed');
+  assert.equal(runState().status, 'watching');
 });
 
 // ---------------------------------------------------------------------------
@@ -273,7 +276,7 @@ test('watchdog warns when the tab has gone quiet', async () => {
   await fake.chrome.alarms.onAlarm.dispatch({ name: WATCHDOG_ALARM });
   await settle();
   assert.equal(notified('stale').length, before + 1);
-  assert.equal(runState().status, 'armed'); // a warning, not a pause
+  assert.equal(runState().status, 'watching'); // a warning, not a pause
 });
 
 test('watchdog pauses if the tab vanished without an onRemoved event', async () => {
@@ -335,4 +338,109 @@ test('refuses to arm while the active tab is a ticket site', async () => {
 test('refuses to arm a scheduled drop in the past', async () => {
   await saveConfig({ triggerMode: 'scheduled', dropTime: Date.now() - 1000 });
   assert.match((await send(MESSAGES.ARM)).error, /in the past/);
+});
+
+// ---------------------------------------------------------------------------
+// Triggers (Phase 3)
+// ---------------------------------------------------------------------------
+
+test('a scheduled arm starts "waiting" and sets the 2-minute pre-warning alarm', async () => {
+  const dropTime = Date.now() + 10 * 60_000;
+  await saveConfig({ triggerMode: 'scheduled', dropTime, burstIntervalSec: 3, burstWindowSec: 60 });
+  await armFresh();
+  assert.equal(runState().status, 'waiting');
+  assert.equal(fake.alarms.get(PREWARN_ALARM).when, dropTime - 120_000);
+});
+
+test('the pre-warning notifies and brings the retailer tab forward', async () => {
+  fake.calls.focused.length = 0;
+  await fake.chrome.alarms.onAlarm.dispatch({ name: PREWARN_ALARM });
+  await settle();
+  assert.match(notified('prewarn').at(-1).title, /Drop in 2 minutes/);
+  assert.ok(fake.calls.focused.includes(runTab()));
+});
+
+test('watch reports are sanitised, kept per run, and handed back on hello', async () => {
+  const res = await send(MESSAGES.WATCH_REPORT, content(runTab()), {
+    watch: { method: 'reload', clockOffsetMs: 1200, checks: 3, lastResult: 'out_of_stock', lastDetail: 'x'.repeat(500), evil: 'y', backoffLevel: 99 },
+    event: { level: 'warn', text: 'The store said slow down (HTTP 429). Backing off for 8s.' },
+  });
+  assert.deepEqual(res, { ok: true });
+  const hello = await send(MESSAGES.CONTENT_HELLO, content(runTab()));
+  assert.equal(hello.config.triggerMode, 'scheduled');
+  assert.equal(hello.watch.runId, runState().runId);
+  assert.equal(hello.watch.method, 'reload');
+  assert.equal(hello.watch.clockOffsetMs, 1200);
+  assert.equal(hello.watch.lastDetail.length, 200);
+  assert.equal(hello.watch.backoffLevel, 10);
+  assert.equal(Object.hasOwn(hello.watch, 'evil'), false);
+  assert.ok(runState().events.some((e) => e.level === 'warn' && /HTTP 429/.test(e.text)));
+
+  const other = await fake.chrome.tabs.create({ url: PRODUCT, active: false });
+  assert.match((await send(MESSAGES.WATCH_REPORT, content(other.id), { watch: {} })).error, /Not the active run tab/);
+  const status = await send(MESSAGES.GET_STATUS);
+  assert.equal(status.watch.checks, 3);
+});
+
+test('DROP_FIRED moves waiting -> watching with a burst window, once', async () => {
+  const res = await send(MESSAGES.DROP_FIRED, content(runTab()), { clockOffsetMs: 1200 });
+  assert.deepEqual(res, { ok: true });
+  const s = runState();
+  assert.equal(s.status, 'watching');
+  assert.equal(s.burstUntil - s.firedAt, 60_000);
+  assert.ok(s.events.some((e) => /store clock \+1\.2s/.test(e.text)));
+  assert.match((await send(MESSAGES.DROP_FIRED, content(runTab()))).error, /Not waiting/);
+});
+
+test('AVAILABLE hands the purchase to the user; guards and nags then stand down', async () => {
+  fake.calls.focused.length = 0;
+  const res = await send(MESSAGES.AVAILABLE, content(runTab()), { detail: 'Structured data says in stock', price: 499.99, source: 'json-ld' });
+  assert.deepEqual(res, { ok: true });
+  await settle();
+  assert.equal(runState().status, 'awaiting_user');
+  assert.match(runState().message, /499\.99/);
+  assert.equal(notified('available').at(-1).requireInteraction, true);
+  assert.ok(fake.calls.focused.includes(runTab()));
+
+  // The user is checking out: their own password prompt must not pause anything.
+  await send(MESSAGES.GUARD_STATUS, content(runTab()), { guard: { kind: 'signin', label: 'Password', signature: 'signin:password:/' } });
+  assert.equal(runState().status, 'awaiting_user');
+  await fake.chrome.storage.session.set({ [STORAGE_KEYS.NOTICES]: {} });
+  const hidden = notified('hidden').length;
+  await send(MESSAGES.PRESENCE, content(runTab()), { visible: false });
+  assert.equal(notified('hidden').length, hidden);
+
+  assert.match((await send(MESSAGES.AVAILABLE, content(runTab()), { detail: 'again' })).error, /Not watching/);
+});
+
+test('"cannot read stock" is told to the user once per run', async () => {
+  await saveConfig();
+  await armFresh();
+  const before = notified(`unreadable-${runState().runId}`).length;
+  await send(MESSAGES.WATCH_REPORT, content(runTab()), { watch: {}, unreadable: true });
+  await send(MESSAGES.WATCH_REPORT, content(runTab()), { watch: {}, unreadable: true });
+  assert.equal(notified(`unreadable-${runState().runId}`).length, before + 1);
+});
+
+test('a pause during the countdown resumes back to waiting', async () => {
+  await saveConfig({ triggerMode: 'scheduled', dropTime: Date.now() + 30 * 60_000 });
+  await armFresh();
+  await send(MESSAGES.GUARD_STATUS, content(runTab()), { guard: captcha });
+  assert.equal(runState().pause.from, 'waiting');
+  await send(MESSAGES.GUARD_STATUS, content(runTab()), { guard: null });
+  await send(MESSAGES.RESUME);
+  assert.equal(runState().status, 'waiting');
+});
+
+test('a drop "fired" implausibly early is refused', async () => {
+  // dropTime is 30 minutes away; clock correction is capped at 10 minutes.
+  assert.match((await send(MESSAGES.DROP_FIRED, content(runTab()))).error, /Not waiting/);
+  assert.equal(runState().status, 'waiting');
+});
+
+test('disarming a scheduled run clears the pre-warning alarm', async () => {
+  assert.ok(fake.alarms.has(PREWARN_ALARM));
+  await send(MESSAGES.DISARM);
+  await settle();
+  assert.ok(!fake.alarms.has(PREWARN_ALARM));
 });

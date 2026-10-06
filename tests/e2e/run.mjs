@@ -14,6 +14,7 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { startServer } from '../../tools/serve.mjs';
+import { createMockStore } from '../../tools/mock-store.mjs';
 
 const ROOT = fileURLToPath(new URL('../../', import.meta.url));
 const CHROME = process.env.CHROME_PATH;
@@ -79,8 +80,22 @@ const manifestPath = join(extDir, 'manifest.json');
 const manifest = JSON.parse(await readFile(manifestPath, 'utf8'));
 manifest.host_permissions = ['http://localhost/*'];
 await writeFile(manifestPath, JSON.stringify(manifest, null, 2));
+// Test-only: lower the polite-interval floors so a check doesn't take 20+ s. The real
+// extension is never modified; this patches the throwaway copy.
+const constantsPath = join(extDir, 'shared', 'constants.js');
+let constantsSrc = await readFile(constantsPath, 'utf8');
+for (const [from, to] of [
+  ['RESTOCK_INTERVAL_MIN: 20,', 'RESTOCK_INTERVAL_MIN: 2,'],
+  ['BURST_INTERVAL_MIN: 2,', 'BURST_INTERVAL_MIN: 1,'],
+  ['BURST_WINDOW_MIN: 10,', 'BURST_WINDOW_MIN: 3,'],
+]) {
+  assert.ok(constantsSrc.includes(from), `constants.js no longer contains "${from}"`);
+  constantsSrc = constantsSrc.replace(from, to);
+}
+await writeFile(constantsPath, constantsSrc);
 
-const server = await startServer({ root: join(ROOT, 'tests', 'fixtures'), port: 0 });
+const store = createMockStore();
+const server = await startServer({ root: join(ROOT, 'tests', 'fixtures'), port: 0, store });
 const PORT = server.address().port;
 const BASE = `http://localhost:${PORT}`;
 
@@ -162,10 +177,10 @@ try {
   }
 
   const state = () => sw('return await readRunState();');
-  const waitState = (pred, what) => waitUntil(async () => {
+  const waitState = (pred, what, timeout = 8000) => waitUntil(async () => {
     const s = await state();
     return pred(s) ? s : null;
-  }, { what });
+  }, { what, timeout });
   const go = (path) => sw(`const s = await readRunState(); await chrome.tabs.update(s.tabId, { url: ${JSON.stringify(path.startsWith('http') ? path : BASE + path)} }); return true;`);
 
   /** Reads the in-page panel's text and buttons, piercing its closed shadow root. */
@@ -237,18 +252,18 @@ try {
     await go(path);
     await waitState((s) => s.pause?.cleared, 'pause to clear');
     assert.deepEqual(await sw('return await resume();'), { ok: true });
-    await waitState((s) => s.status === 'armed', 'resume');
+    await waitState((s) => s.status === 'watching', 'resume');
   };
 
   console.log(`Ro-Bought e2e — Chrome ${swTarget.url.split('/')[2]} on ${BASE}`);
 
-  await step('configure + arm opens the product tab and connects', async () => {
+  await step('configure + arm (restock) opens the product tab and connects', async () => {
     const reg = await sw(`
       await chrome.storage.local.set({ config: { productUrl: '${BASE}/product.html', triggerMode: 'restock' } });
       return await syncContentScripts();`);
     assert.equal(reg.registered, true, JSON.stringify(reg));
     assert.deepEqual(await sw('return await arm();'), { ok: true });
-    await waitState((s) => s.status === 'armed' && s.tabId && connected(s), 'tab to connect');
+    await waitState((s) => s.status === 'watching' && s.tabId && connected(s), 'tab to connect');
   });
 
   await step('status panel renders in a closed shadow root', async () => {
@@ -258,19 +273,19 @@ try {
       return r?.present ? r : null;
     }, { what: 'panel' });
     assert.equal(p.shadowMode, 'closed');
-    assert.ok(p.texts.includes('Armed'), p.texts.join(' | '));
+    assert.ok(p.texts.includes('Watching'), p.texts.join(' | '));
     assert.ok(p.buttons.some((b) => b.action === 'disarm'));
   });
 
   await step('ordinary product page with hidden password field + invisible reCAPTCHA badge does not pause', async () => {
-    await stays('armed');
+    await stays('watching');
     const presence = await sw("return (await chrome.storage.session.get('presence')).presence;");
     assert.ok(presence && presence.tabId === (await state()).tabId, 'presence recorded');
   });
 
   await step('book titled "The Waiting Room" (full page) does not pause', async () => {
     await go('/book.html');
-    await stays('armed');
+    await stays('watching');
   });
 
   await step('PerimeterX "press & hold" block page pauses', async () => {
@@ -293,7 +308,7 @@ try {
       return r?.texts?.includes('Resume') ? r : null;
     }, { what: 'panel Resume button' });
     await clickPanelButton('resume');
-    const s = await waitState((x) => x.status === 'armed', 'resume via panel');
+    const s = await waitState((x) => x.status === 'watching', 'resume via panel');
     assert.equal(s.ackSignature, null);
   });
 
@@ -336,12 +351,12 @@ try {
     assert.deepEqual(await sw('return await resume();'), { ok: true });
     const s = await state();
     assert.ok(s.ackSignature?.startsWith('challenge:perimeterx:'), s.ackSignature);
-    await stays('armed');
+    await stays('watching');
   });
 
   await step('hidden reCAPTCHA frame stays ignored; revealing it later pauses', async () => {
     await go('/product.html?inject=recaptchaHidden');
-    await stays('armed', 1200);
+    await stays('watching', 1200);
     await go('/product.html?inject=recaptchaLater');
     const s = await waitState((x) => x.status === 'paused', 'pause');
     assert.equal(s.pause.kind, 'captcha');
@@ -363,7 +378,7 @@ try {
     const s = await waitState((x) => x.status === 'paused', 'pause');
     assert.equal(s.pause.kind, 'tab_closed');
     assert.deepEqual(await sw('return await resume();'), { ok: true });
-    const after = await waitState((x) => x.status === 'armed' && x.tabId !== before.tabId && connected(x), 'reconnect');
+    const after = await waitState((x) => x.status === 'watching' && x.tabId !== before.tabId && connected(x), 'reconnect');
     assert.ok(after.tabId);
   });
 
@@ -386,12 +401,154 @@ try {
 
   await step('event/ticket structured data on a page aborts the run', async () => {
     assert.deepEqual(await sw('return await arm();'), { ok: true });
-    await waitState((s) => s.status === 'armed' && connected(s), 'arm');
+    await waitState((s) => s.status === 'watching' && connected(s), 'arm');
     await go('/guards/event.html');
     const s = await waitState((x) => x.status === 'aborted', 'abort');
     assert.match(s.message, /event or ticket/);
     assert.match((await sw('return await arm();')).error, /Reset for a new run/);
     assert.deepEqual(await sw('return await reset();'), { ok: true });
+  });
+
+  // -------------------------------------------------------------------------
+  // Phase 3: triggers, against the mock store
+  // -------------------------------------------------------------------------
+
+  const STORE_PRODUCT = `${BASE}/store/product.html`;
+  const configure = async (over) => {
+    const cfg = { productUrl: STORE_PRODUCT, triggerMode: 'restock', restockIntervalSec: 2, jitterPct: 0, ...over };
+    const reg = await sw(`await chrome.storage.local.set({ config: ${JSON.stringify(cfg)} }); return await syncContentScripts();`);
+    assert.equal(reg.registered, true, JSON.stringify(reg));
+  };
+  const armRun = async (expectStatus) => {
+    assert.deepEqual(await sw('return await arm();'), { ok: true });
+    return waitState((s) => s.status === expectStatus && connected(s), `arm -> ${expectStatus}`);
+  };
+  const disarmRun = async () => {
+    await sw('return await disarm();');
+    await waitState((s) => s.status === 'idle', 'disarm');
+  };
+  const pageGets = (since, path = '/store/product.html') =>
+    store.requests((r) => r.t >= since && r.path === path && r.method === 'GET');
+  const watchInfo = async () => (await sw('return await getStatus();')).watch;
+  const gapsOf = (list) => list.slice(1).map((r, i) => r.t - list[i].t);
+
+  await step('restock: background checks of the page source, politely spaced', async () => {
+    store.reset();
+    await configure({});
+    const t0 = Date.now();
+    await armRun('watching');
+    const fetches = await waitUntil(() => {
+      const list = pageGets(t0).filter((r) => r.mode === 'cors');
+      return list.length >= 3 ? list : null;
+    }, { timeout: 12000, what: '3 background checks' });
+    const gaps = gapsOf(fetches);
+    assert.ok(gaps.every((g) => g >= 1900), `gaps ${gaps.join(', ')} ms`);
+    const w = await watchInfo();
+    assert.equal(w.method, 'fetch');
+    assert.equal(w.lastResult, 'out_of_stock');
+  });
+
+  await step('restock: HTTP 429 with Retry-After backs off, then recovers', async () => {
+    store.failNext(429, 1, 5);
+    const failed429 = await waitUntil(
+      () => store.requests((r) => r.status === 429)[0] || null,
+      { timeout: 8000, what: 'the 429' },
+    );
+    const next = await waitUntil(
+      () => pageGets(failed429.t + 1).find((r) => r.mode === 'cors') || null,
+      { timeout: 12000, what: 'the check after the 429' },
+    );
+    assert.ok(next.t - failed429.t >= 4900, `waited only ${next.t - failed429.t} ms`);
+    const s = await state();
+    assert.ok(s.events.some((e) => /slow down \(HTTP 429\)/.test(e.text)));
+    await waitUntil(async () => (await watchInfo())?.backoffLevel === 0, { what: 'back-off to reset' });
+  });
+
+  await step('restock: in stock -> page reload confirms -> handed to you', async () => {
+    const tIn = Date.now();
+    store.set({ stock: 'in' });
+    const s = await waitState((x) => x.status === 'awaiting_user', 'hand-off', 10000);
+    assert.match(s.message, /In stock now/);
+    const after = pageGets(tIn);
+    const firstFetch = after.findIndex((r) => r.mode === 'cors');
+    const firstNav = after.findIndex((r) => r.mode === 'navigate');
+    assert.ok(firstFetch !== -1 && firstNav > firstFetch, `expected fetch then reload: ${after.map((r) => r.mode).join(',')}`);
+    const p = await waitUntil(async () => {
+      const r = await panel();
+      if (r?.sessionId) await cdp.send('Target.detachFromTarget', { sessionId: r.sessionId }).catch(() => {});
+      return r?.texts?.includes('In stock — your turn') ? r : null;
+    }, { what: 'panel "In stock — your turn"' });
+    assert.ok(p.buttons.some((b) => b.action === 'disarm'));
+    await disarmRun();
+  });
+
+  await step('price ceiling: in stock above the max keeps watching; a lower price hands off', async () => {
+    store.reset();
+    store.set({ stock: 'in', price: 499.99 });
+    await configure({ maxTotalPrice: 400 });
+    await armRun('watching');
+    await waitState((s) => s.events.some((e) => /above your max/.test(e.text)), 'over-price event');
+    await stays('watching', 2500);
+    store.set({ price: 349 });
+    await waitState((s) => s.status === 'awaiting_user', 'hand-off at the lower price', 10000);
+    await disarmRun();
+  });
+
+  await step('client-rendered store: switches to page reloads, then catches the restock', async () => {
+    store.reset();
+    await configure({ productUrl: `${BASE}/store/spa.html` });
+    const t0 = Date.now();
+    await armRun('watching');
+    await waitUntil(async () => (await watchInfo())?.method === 'reload', { timeout: 12000, what: 'switch to reload mode' });
+    await waitUntil(() => pageGets(t0, '/store/spa.html').filter((r) => r.mode === 'navigate').length >= 3,
+      { timeout: 12000, what: 'reload checks' });
+    store.set({ stock: 'in' });
+    await waitState((s) => s.status === 'awaiting_user', 'hand-off', 12000);
+    await disarmRun();
+  });
+
+  await step('scheduled drop: corrects for a store clock 3 s ahead and fires on time', async () => {
+    store.reset();
+    const skew = 3000;
+    const dropTime = Date.now() + 16_000;
+    const storeDropReal = dropTime - skew; // when the store's own clock reads dropTime
+    store.set({ skewMs: skew, dropAt: storeDropReal });
+    await configure({ triggerMode: 'scheduled', dropTime, burstIntervalSec: 1, burstWindowSec: 5 });
+    await armRun('waiting');
+    const w = await waitUntil(async () => {
+      const info = await watchInfo();
+      return info && info.clockOffsetMs !== null ? info : null;
+    }, { timeout: 15000, what: 'clock check' });
+    assert.ok(w.clockOffsetMs <= skew && skew - w.clockOffsetMs <= 400, `estimated offset ${w.clockOffsetMs} ms (true ${skew})`);
+    assert.ok(store.requests((r) => r.method === 'HEAD').length >= 3, 'HEAD samples');
+
+    const s = await waitState((x) => x.status === 'awaiting_user', 'hand-off after the drop', 20000);
+    assert.ok(s.firedAt, 'fired');
+    const reload = pageGets(storeDropReal - 2000).find((r) => r.mode === 'navigate');
+    const error = reload.t - storeDropReal;
+    console.log(`      fire precision vs the store's drop moment: ${error >= 0 ? '+' : ''}${error} ms (clock estimate ${w.clockOffsetMs} ms)`);
+    // Never early (small slack for timer/network jitter), and well under a second late.
+    assert.ok(error >= -30 && error <= 600, `fired ${error} ms from the store's drop moment`);
+    await disarmRun();
+  });
+
+  await step('scheduled drop: not live yet at T -> fast burst checks until it is', async () => {
+    store.reset();
+    const dropTime = Date.now() + 11_000;
+    store.set({ dropAt: dropTime + 3000 }); // the store is 3 s late
+    await configure({ triggerMode: 'scheduled', dropTime, burstIntervalSec: 1, burstWindowSec: 6 });
+    await armRun('waiting');
+    const s = await waitState((x) => x.status === 'awaiting_user', 'hand-off', 25000);
+    const burst = pageGets(dropTime + 200).filter((r) => r.mode === 'cors' && r.t < dropTime + 3000);
+    assert.ok(burst.length >= 2, `only ${burst.length} burst checks`);
+    assert.ok(gapsOf(burst).every((g) => g >= 900), `burst gaps ${gapsOf(burst).join(', ')} ms`);
+    // Only this run's events: the log carries over from earlier runs.
+    const live = s.events.filter((e) => e.t >= dropTime && e.text.startsWith('In stock')).at(-1);
+    assert.ok(live, 'an "In stock" event from this run');
+    const lag = live.t - (dropTime + 3000);
+    console.log(`      handed off ${lag} ms after the store went live`);
+    assert.ok(lag >= 0 && lag < 2500, `handed off ${lag} ms after the store went live`);
+    await disarmRun();
   });
 
   await step('no errors logged by the service worker', async () => {

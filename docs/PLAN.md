@@ -32,15 +32,23 @@ Each part has one job:
 - **Offscreen document:** used only to play an audible alert (`AUDIO_PLAYBACK`) when the
   bot hands control back to the user. It is not used for timing.
 
-Precise-fire algorithm (Phase 3):
+Precise-fire algorithm (built in Phase 3, `content/clock.js` + `shared/timing.js`):
 
-1. Estimate the offset between the local clock and the retailer's clock from the
-   `Date` header on a few spaced `HEAD` requests. Users can also set a manual offset.
-2. Use plain `setTimeout` until about T−2 s. After that, use `requestAnimationFrame`, then a
-   `MessageChannel` microtask loop for the last ~16 ms.
-3. At T, reload or re-check the product. If it isn't buyable yet, enter a short,
-   polite **burst window** with retries every ≥2 s plus jitter for up to N minutes,
-   then fall back to restock-watch cadence.
+1. At T−60 s, send five `HEAD` requests to the product URL, 1.2 s apart (so they land at
+   different sub-second phases). Each `Date` header (1-second resolution) bounds the clock offset
+   to an interval, and the intersection of those intervals narrows it to a few hundred ms.
+   Cached responses (`Age > 0`) are ignored.
+2. Use the interval's **low end**: the latest moment by which the store's clock has certainly
+   reached T. The bot is never early. A fraction of a second late costs nothing, while early
+   means the first reload still shows "out of stock". In e2e tests against a store clock 3 s
+   ahead, it fired +65 to +153 ms after the store's moment. Users can add a manual fire offset.
+3. Wait with timers in ≤30 s chunks, re-anchored each time so sleep or clock changes are
+   corrected. Switch to `requestAnimationFrame` for the last 1.5 s, then a `MessageChannel`
+   macrotask loop for the last ~20 ms.
+4. At T, tell the service worker (waiting → watching, burst window starts) and reload the
+   product page; that page load is the first check. If the product isn't buyable yet, run a
+   polite **burst window** (every ≥2 s plus jitter, up to 10 min), then fall back to the restock
+   interval.
 
 ### 1.2 Least-privilege permissions
 
@@ -138,7 +146,7 @@ Each phase ends with a pause so you can review, change, and commit.
 - Content-script stub (handshake only).
 - Node unit tests (`node --test`, zero deps) for the guard and the validation.
 
-### Phase 2 — Content runtime and page guards ✅ (this commit)
+### Phase 2 — Content runtime and page guards ✅
 - Site scope widened from one exact host to bare host + `www.` (Amazon redirects between them).
 - Content runtime: handshake, page-level ticket detection (JSON-LD walked with a node budget,
   `og:type`, title/heading), and a guard detector (`content/guards.js`) re-run by a debounced
@@ -153,15 +161,34 @@ Each phase ends with a pause so you can review, change, and commit.
 - Test harness pulled forward from Phase 3: `tools/serve.mjs`, fixture pages in `tests/fixtures/`,
   and `tests/e2e/run.mjs` (Chrome for Testing over CDP, zero dependencies).
 
-### Phase 3 — Triggers
-- Scheduled drop: service-worker pre-warning alarm (T−2 min), server-clock offset
-  estimation, precise fire in the content script, polite burst window.
-- Restock watch: same-origin `fetch` of the product page with the user's cookies, parsed
-  with `DOMParser`. Interval plus jitter, 429/503 backoff with `Retry-After`, and an
-  `AbortController` on every request.
-- Availability detection (JSON-LD, then the selector).
-- Local **mock store** (`tests/fixtures/store/`, served by `tools/serve.mjs`) with stock that
-  can be toggled, so drops and restocks can be rehearsed without a real retailer.
+### Phase 3 — Triggers ✅ (this commit)
+- Arming goes straight to `waiting` (scheduled) or `watching` (restock).
+- **Scheduled drop:** a 2-minute pre-warning alarm (notify, then focus the tab), the never-early
+  clock offset, precise fire, `DROP_FIRED` → `watching` with a burst window, and an early-live
+  check on page load.
+- **Restock watch** (`content/watcher.js`): a same-origin `fetch` of the page source parsed with
+  `DOMParser`, which never runs scripts or loads subresources.
+  - If it says in stock, reload the page and confirm on the live page before acting.
+  - If stock can't be read from the source (client-rendered stores), switch to page reloads, with a
+    5 s "settle" wait for the buy button.
+  - 429/503 back off exponentially and honour `Retry-After`. 403 or a challenge page in the source
+    reloads the tab so the live guards can pause. A redirect off-site is shown to the user.
+  - One AbortController per run; every sleep, fetch and frame wait is cancellable.
+- **Stock detection** (`content/stock.js`, `content/adapters.js`): the Amazon.com adapter (buy box,
+  `#availability`, marketplace-only = not a restock, price), the Nintendo US store (structured
+  data and button), then JSON-LD offers → meta/microdata → the main buy button. If none of these
+  is conclusive the result is `unknown`, never a guess. In stock above the max price keeps watching.
+- **Static guard mode** for fetched HTML: only whole-page challenge markers count.
+- **Hand-off:** until Phase 4, "in stock" → `awaiting_user`, with a requireInteraction notification
+  and the tab focused. Guards, hidden-tab nags and the watchdog stand down while the user is in
+  control.
+- Watcher memory (method, back-off, clock offset, last result) lives in `storage.session`, so it
+  survives the page reloads that are part of the run. The popup shows a live countdown or the
+  last-check line.
+- **Mock store** (`tools/mock-store.mjs`): server-rendered and client-rendered product pages, plus
+  stock, price, scheduled go-live, clock skew and injected 429s, controlled via `/__control`.
+  Drives 8 new e2e steps covering polite spacing, back-off, hand-off, price ceiling, reload
+  fallback, clock skew and burst.
 
 ### Phase 4 — Checkout engine
 - Generic selector adapter, "pick element" helper, stage machine across page loads

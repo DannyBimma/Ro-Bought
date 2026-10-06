@@ -8,6 +8,8 @@
 
   // A *visible* match means a human is needed. Hidden widgets (e.g. the invisible
   // reCAPTCHA badge many stores load on every page) don't count until they're shown.
+  // `pageLevel` rules mark a whole challenge/block page served instead of the real one, so
+  // they're also trusted in "static" mode (fetched HTML, where nothing has layout).
   const SELECTOR_RULES = [
     // CAPTCHAs and bot checks
     {
@@ -22,7 +24,7 @@
     { id: 'hcaptcha', kind: 'captcha', label: 'An hCaptcha appeared', min: 30, selector: 'iframe[src*="hcaptcha.com"]' },
     { id: 'turnstile', kind: 'challenge', label: 'A Cloudflare human check appeared', min: 30, selector: 'iframe[src*="challenges.cloudflare.com"]' },
     {
-      id: 'cloudflare-interstitial', kind: 'challenge', label: 'A Cloudflare security check is showing', min: 1,
+      id: 'cloudflare-interstitial', kind: 'challenge', label: 'A Cloudflare security check is showing', min: 1, pageLevel: true,
       selector: '#challenge-form, #challenge-stage, #cf-challenge-running, #cf-please-wait',
     },
     {
@@ -30,19 +32,25 @@
       selector: 'iframe[src*="arkoselabs.com"], iframe[src*="funcaptcha.com"], #FunCaptcha, #arkose-iframe',
     },
     {
-      id: 'perimeterx', kind: 'challenge', label: 'A "press & hold" human check appeared', min: 10,
+      id: 'perimeterx', kind: 'challenge', label: 'A "press & hold" human check appeared', min: 10, pageLevel: true,
       selector: '#px-captcha, #px-captcha-wrapper, iframe[src*="px-cdn.net"], iframe[src*="perimeterx"]',
     },
-    { id: 'datadome', kind: 'captcha', label: 'A DataDome CAPTCHA appeared', min: 30, selector: 'iframe[src*="captcha-delivery.com"]' },
+    {
+      id: 'datadome', kind: 'captcha', label: 'A DataDome CAPTCHA appeared', min: 30, pageLevel: true,
+      selector: 'iframe[src*="captcha-delivery.com"]',
+    },
     { id: 'aws-waf', kind: 'captcha', label: 'An AWS WAF CAPTCHA appeared', min: 10, selector: 'awswaf-captcha, iframe[src*=".awswaf.com"]' },
     {
-      id: 'amazon-captcha', kind: 'captcha', label: 'Amazon is asking you to type the characters from an image', min: 1,
+      id: 'amazon-captcha', kind: 'captcha', label: 'Amazon is asking you to type the characters from an image', min: 1, pageLevel: true,
       selector: 'form[action*="/errors/validateCaptcha"], #captchacharacters',
     },
     { id: 'geetest', kind: 'captcha', label: 'A GeeTest puzzle appeared', min: 30, selector: '.geetest_panel, .geetest_holder, iframe[src*="geetest"]' },
-    { id: 'imperva', kind: 'challenge', label: 'An Imperva security check is showing', min: 30, selector: 'iframe[src*="_Incapsula_Resource"]' },
     {
-      id: 'akamai', kind: 'challenge', label: 'An Akamai security check is showing', min: 1,
+      id: 'imperva', kind: 'challenge', label: 'An Imperva security check is showing', min: 30, pageLevel: true,
+      selector: 'iframe[src*="_Incapsula_Resource"]',
+    },
+    {
+      id: 'akamai', kind: 'challenge', label: 'An Akamai security check is showing', min: 1, pageLevel: true,
       selector: '#sec-if-cpt-container, #sec-cpt-if, iframe[src*="/_sec/cp_challenge/"]',
     },
     {
@@ -131,12 +139,26 @@
     };
   }
 
-  function interstitialText(doc) {
+  const NON_TEXT_PARENTS = new Set(['SCRIPT', 'STYLE', 'NOSCRIPT', 'TEMPLATE']);
+
+  /** Text of a document that has no layout (fetched HTML): skips script/style bodies. */
+  function staticText(doc, root, max) {
+    const walker = doc.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
+      acceptNode: (n) => (NON_TEXT_PARENTS.has(n.parentNode?.nodeName) ? NodeFilter.FILTER_REJECT : NodeFilter.FILTER_ACCEPT),
+    });
+    let out = '';
+    for (let n = walker.nextNode(); n && out.length < max; n = walker.nextNode()) out += `${n.nodeValue} `;
+    return out.replace(/\s+/g, ' ').slice(0, max);
+  }
+
+  function interstitialText(doc, isStatic) {
     if (!doc.body) return doc.title || '';
     if (doc.links.length <= SPARSE_PAGE_MAX_LINKS) {
       // innerText = rendered text only (no <script> bodies, nothing hidden).
-      return `${doc.title}\n${doc.body.innerText.slice(0, 3000)}`;
+      const body = isStatic ? staticText(doc, doc.body, 3000) : doc.body.innerText.slice(0, 3000);
+      return `${doc.title}\n${body}`;
     }
+    if (isStatic) return ''; // dialogs only matter when they're actually showing
     const parts = [];
     const dialogs = doc.querySelectorAll('[role="dialog"], [role="alertdialog"], [aria-modal="true"], dialog[open]');
     for (let i = 0; i < Math.min(dialogs.length, 5); i++) {
@@ -146,9 +168,14 @@
   }
 
   /**
+   * @param {Document} doc
+   * @param {{hostname: string, pathname: string}} loc
+   * @param {{static?: boolean}} [opts] static: `doc` is fetched HTML with no layout — only
+   *   page-level markers count (a hidden password field in page source means nothing).
    * @returns {{kind: string, label: string, rule: string, signature: string} | null}
    */
-  function detectBlocker(doc = document, loc = location) {
+  function detectBlocker(doc = document, loc = location, opts = {}) {
+    const isStatic = !!opts.static;
     const host = loc.hostname.toLowerCase();
     for (const rule of HOST_RULES) {
       if (!rule.host.test(host)) continue;
@@ -157,9 +184,12 @@
       if (extra) return hit(extra, loc);
     }
     for (const rule of SELECTOR_RULES) {
-      if (firstVisible(doc, rule.selector, rule.min)) return hit(rule, loc);
+      const found = isStatic
+        ? rule.pageLevel && doc.querySelector(rule.selector)
+        : firstVisible(doc, rule.selector, rule.min);
+      if (found) return hit(rule, loc);
     }
-    const text = interstitialText(doc);
+    const text = interstitialText(doc, isStatic);
     if (text) {
       for (const rule of TEXT_RULES) if (rule.re.test(text)) return hit(rule, loc);
     }

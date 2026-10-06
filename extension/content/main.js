@@ -1,6 +1,6 @@
 // Ro-Bought content script — injected ONLY into the configured retailer site.
-// Phase 2: handshake, page guards (pause + hand back), heartbeat/visibility, status panel.
-// The precise clock and checkout engine arrive in Phases 3–4.
+// Handshake, page guards (pause + hand back), heartbeat/visibility, status panel, and the
+// trigger controller (content/watcher.js). The checkout engine arrives in Phase 4.
 (() => {
   'use strict';
 
@@ -18,6 +18,9 @@
 
   let myTabId = null;
   let state = null;
+  let runConfig = null;   // validated config subset, from the service worker
+  let savedWatch = null;  // watcher memory from earlier page loads of this run
+  let watcherNote = '';   // the watcher's latest one-line status
   let observer = null;
   let checkTimer = null;
   let heartbeatTimer = null;
@@ -28,6 +31,9 @@
 
   const isRunTab = () => !!state && myTabId !== null && state.tabId === myTabId;
   const isActive = () => isRunTab() && ACTIVE_STATUSES.includes(state.status);
+  // Guards and heartbeat run while the bot is (or may soon be) acting — not once the user
+  // has taken over the purchase.
+  const isGuarding = () => isActive() && state.status !== RUN_STATUS.AWAITING_USER;
   const pageVisible = () => document.visibilityState === 'visible';
 
   // ---------------------------------------------------------------------------
@@ -55,7 +61,7 @@
 
   function checkGuards() {
     checkTimer = null;
-    if (!isActive()) return;
+    if (!isGuarding()) return;
     RoBought.overlay.ensureAttached();
     const hit = RoBought.guards.detectBlocker(document, location);
     const signature = hit ? hit.signature : null;
@@ -122,11 +128,20 @@
         ],
       };
     }
+    if (s.status === RUN_STATUS.AWAITING_USER) {
+      return {
+        pill, tone,
+        title: 'In stock — your turn',
+        body: s.message,
+        hint: flash || 'Ro-Bought has stopped checking. Disarm when you are done.',
+        actions: [{ id: 'disarm', label: 'Done — disarm', variant: 'primary' }],
+      };
+    }
     if (ACTIVE_STATUSES.includes(s.status)) {
       return {
         pill, tone,
         body: s.message,
-        hint: flash || 'Keep this tab in the foreground and your computer awake.',
+        hint: flash || watcherNote || 'Keep this tab in the foreground and your computer awake.',
         actions: [disarm],
       };
     }
@@ -164,12 +179,24 @@
   // State
   // ---------------------------------------------------------------------------
 
+  function onWatcherNote(text) {
+    if (text === watcherNote) return;
+    watcherNote = text;
+    renderOverlay();
+  }
+
   function applyState(next) {
     state = next && typeof next === 'object' ? next : null;
     flash = '';
     if (state && !TERMINAL_STATUSES.includes(state.status)) dismissed = false;
-    if (isActive()) startWatching();
+    if (isGuarding()) startWatching();
     else stopWatching();
+    if (isActive() && runConfig) {
+      RoBought.watcher.sync({ state, config: runConfig, watch: savedWatch, send, onNote: onWatcherNote });
+    } else {
+      RoBought.watcher.stop();
+      watcherNote = '';
+    }
     renderOverlay();
   }
 
@@ -180,7 +207,7 @@
   }
 
   function onVisibilityChange() {
-    if (isActive()) send(MESSAGES.PRESENCE, { visible: pageVisible() });
+    if (isGuarding()) send(MESSAGES.PRESENCE, { visible: pageVisible() });
   }
 
   async function hello() {
@@ -190,19 +217,27 @@
       RoBought.ticketGuard.checkUrl(location.href) || RoBought.guards.detectTicketPage(document);
     const res = await send(MESSAGES.CONTENT_HELLO, { ticketReason, visible: pageVisible() });
     if (res && Number.isInteger(res.tabId)) myTabId = res.tabId;
+    if (res && res.config && typeof res.config === 'object') runConfig = res.config;
+    savedWatch = res && res.watch && typeof res.watch === 'object' ? res.watch : null;
   }
 
   function onPageShow(ev) {
     // Restored from the back/forward cache: re-introduce ourselves and re-report guards.
     if (!ev.persisted) return;
     lastGuardSignature = undefined;
-    hello().then(() => checkGuards());
+    RoBought.watcher.revive();
+    hello()
+      .then(() => chrome.storage.local.get(STORAGE_KEYS.RUN_STATE))
+      .then((stored) => applyState(stored[STORAGE_KEYS.RUN_STATE]))
+      .then(() => checkGuards())
+      .catch(() => {});
   }
 
   function teardown() {
     if (dead) return;
     dead = true;
     stopWatching();
+    RoBought.watcher.stop();
     try {
       chrome.storage.onChanged.removeListener(onStorageChanged);
     } catch {

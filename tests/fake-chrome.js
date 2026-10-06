@@ -30,6 +30,15 @@ function storageArea(areaName, onChanged) {
       }
       await onChanged.dispatch(changes, areaName);
     },
+    async remove(keys) {
+      const changes = {};
+      for (const k of [].concat(keys)) {
+        if (!store.has(k)) continue;
+        changes[k] = { oldValue: store.get(k) };
+        store.delete(k);
+      }
+      if (Object.keys(changes).length) await onChanged.dispatch(changes, areaName);
+    },
   };
 }
 

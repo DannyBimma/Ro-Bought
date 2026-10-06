@@ -15,9 +15,9 @@ importScripts(
 
 const {
   STORAGE_KEYS, RUN_STATUS, TERMINAL_STATUSES, ACTIVE_STATUSES, MESSAGES,
-  CONTENT_SCRIPT_ID, CONTENT_SCRIPT_FILES, EVENT_LOG_MAX, WATCHDOG_ALARM,
-  STALE_AFTER_MS, HIDDEN_NOTICE_COOLDOWN_MS, STALE_NOTICE_COOLDOWN_MS,
-  CONTENT_GUARD_KINDS, PAUSE_HINTS,
+  CONTENT_SCRIPT_ID, CONTENT_SCRIPT_FILES, EVENT_LOG_MAX, WATCHDOG_ALARM, PREWARN_ALARM,
+  PREWARN_MINUTES, STALE_AFTER_MS, HIDDEN_NOTICE_COOLDOWN_MS, STALE_NOTICE_COOLDOWN_MS,
+  CONTENT_GUARD_KINDS, PAUSE_HINTS, WATCH_RESULTS,
 } = RoBought.constants;
 
 const EXTENSION_ORIGIN = self.location.origin;
@@ -38,6 +38,8 @@ function idleState() {
     message: '',
     pause: null,        // { kind, label, signature, at, cleared, from }
     ackSignature: null, // a guard the user chose to "Resume anyway" past
+    firedAt: null,      // scheduled drop: when the retailer tab fired
+    burstUntil: null,   // scheduled drop: end of the fast-retry window
     purchaseLock: null,
     events: [],
     updatedAt: Date.now(),
@@ -52,6 +54,29 @@ async function loadConfig() {
 async function readRunState() {
   const { [STORAGE_KEYS.RUN_STATE]: s } = await chrome.storage.local.get(STORAGE_KEYS.RUN_STATE);
   return s && typeof s === 'object' ? { ...idleState(), ...s } : idleState();
+}
+
+/** The settings the retailer tab needs to run the triggers (already validated). */
+function runConfigOf(config) {
+  const {
+    productUrl, retailer, triggerMode, dropTime, fireOffsetMs, restockIntervalSec,
+    jitterPct, burstIntervalSec, burstWindowSec, maxTotalPrice,
+  } = config;
+  return {
+    productUrl, retailer, triggerMode, dropTime, fireOffsetMs, restockIntervalSec,
+    jitterPct, burstIntervalSec, burstWindowSec, maxTotalPrice,
+  };
+}
+
+/** Where an active run sits when nothing special is happening. */
+function baseActiveStatus(config, now = Date.now()) {
+  return config.triggerMode === 'scheduled' && config.dropTime > now ? RUN_STATUS.WAITING : RUN_STATUS.WATCHING;
+}
+
+/** Watcher memory for the current run (session storage), or null if it's from another run. */
+async function readWatch(runId) {
+  const { [STORAGE_KEYS.WATCH]: watch } = await chrome.storage.session.get(STORAGE_KEYS.WATCH);
+  return watch && runId && watch.runId === runId ? watch : null;
 }
 
 // Serialised read-modify-write so concurrent messages can never interleave state writes.
@@ -110,6 +135,7 @@ async function applySideEffects(state) {
   } else {
     chrome.power.releaseKeepAwake();
     await chrome.alarms.clear(WATCHDOG_ALARM);
+    await chrome.alarms.clear(PREWARN_ALARM);
   }
 }
 
@@ -241,6 +267,7 @@ async function getStatus() {
   return {
     ok: true,
     state,
+    watch: await readWatch(state.runId),
     config: cfg?.config ?? null,
     configValid: !!cfg?.ok,
     configErrors: cfg?.errors ?? [],
@@ -272,7 +299,7 @@ async function arm() {
     }
     const next = idleState();
     next.events = s.events;
-    next.status = RUN_STATUS.ARMED;
+    next.status = baseActiveStatus(cfg.config);
     next.runId = crypto.randomUUID();
     next.armedAt = Date.now();
     next.activeSince = next.armedAt;
@@ -283,6 +310,12 @@ async function arm() {
     return next;
   });
   if (refusal) return { ok: false, error: refusal };
+
+  await chrome.storage.session.remove(STORAGE_KEYS.WATCH);
+  const prewarnAt = cfg.config.dropTime - PREWARN_MINUTES * 60_000;
+  if (cfg.config.triggerMode === 'scheduled' && prewarnAt > Date.now() + 5_000) {
+    await chrome.alarms.create(PREWARN_ALARM, { when: prewarnAt });
+  }
 
   try {
     const tab = await openRetailerTab(cfg.config.productUrl);
@@ -359,11 +392,12 @@ async function pauseRun(guard, { focus = true } = {}) {
   let paused = false;
   const state = await mutateRunState((s) => {
     if (!ACTIVE_STATUSES.includes(s.status)) return null;
+    if (s.status === RUN_STATUS.AWAITING_USER) return null; // the user is already in control
     if (s.ackSignature && s.ackSignature === guard.signature) return null; // user chose to continue past this
     if (s.status === RUN_STATUS.PAUSED && s.pause?.signature === guard.signature && !s.pause.cleared) return null;
     const from = s.status === RUN_STATUS.PAUSED ? s.pause?.from : s.status;
     s.status = RUN_STATUS.PAUSED;
-    s.pause = { ...guard, at: Date.now(), cleared: false, from: from || RUN_STATUS.ARMED };
+    s.pause = { ...guard, at: Date.now(), cleared: false, from: from || null };
     s.message = `Paused: ${guard.label}.`;
     pushEvent(s, 'warn', s.message);
     paused = true;
@@ -394,6 +428,7 @@ async function markPauseCleared() {
 }
 
 async function resume() {
+  const cfg = await loadConfig();
   let refusal = null;
   let pause = null;
   const state = await mutateRunState((s) => {
@@ -403,7 +438,9 @@ async function resume() {
     }
     pause = s.pause || { kind: 'unknown' };
     const from = pause.from;
-    s.status = from && from !== RUN_STATUS.PAUSED && ACTIVE_STATUSES.includes(from) ? from : RUN_STATUS.ARMED;
+    const fallback = cfg?.ok ? baseActiveStatus(cfg.config) : RUN_STATUS.WATCHING;
+    const resumable = from && ACTIVE_STATUSES.includes(from) && from !== RUN_STATUS.PAUSED && from !== RUN_STATUS.ARMED;
+    s.status = resumable ? from : fallback;
     // "Resume anyway" past an on-page check: remember it so the same check on the same
     // page doesn't immediately re-pause. Tab-level pauses are one-off events, never acked.
     if (!pause.cleared && CONTENT_GUARD_KINDS.includes(pause.kind)) s.ackSignature = pause.signature;
@@ -452,21 +489,150 @@ async function runStateForSender(sender) {
 
 async function onContentHello(msg, sender) {
   const tabId = sender.tab.id;
+  const cfg = await loadConfig();
+  // Every tab on the site gets the settings (so it can take over if it becomes the run tab
+  // later); only the run tab gets the watcher memory.
+  const reply = { ok: true, tabId, config: cfg?.ok ? runConfigOf(cfg.config) : null, watch: null };
   const state = await runStateForSender(sender);
-  if (!state) return { ok: true, tabId }; // another tab on the same site — stays dormant
+  if (!state) return reply; // another tab on the same site — stays dormant
 
   await recordPresence(tabId, msg.visible !== false);
   const ticketReason = typeof msg.ticketReason === 'string' ? msg.ticketReason.slice(0, 200) : null;
   if (ticketReason) {
     await abortRun(`${ticketReason} Event tickets are not supported — the run was stopped.`);
-    return { ok: true, tabId };
+    return reply;
   }
   await mutateRunState((s) => {
     if (!ACTIVE_STATUSES.includes(s.status) || s.tabId !== tabId) return null;
     pushEvent(s, 'info', 'Retailer tab connected.');
     return s;
   });
-  return { ok: true, tabId };
+  reply.watch = await readWatch(state.runId);
+  return reply;
+}
+
+// ---------------------------------------------------------------------------
+// Triggers: watcher reports, drop firing, availability
+// ---------------------------------------------------------------------------
+
+const finiteOr = (v, fallback) => (Number.isFinite(v) ? v : fallback);
+const cleanText = (v, max) => String(v ?? '').replace(/[\u0000-\u001f\u007f]/g, ' ').slice(0, max);
+
+/** Whitelists and bounds the watcher memory reported by the retailer tab. */
+function sanitizeWatch(w, runId) {
+  if (!w || typeof w !== 'object') return null;
+  const clock = w.clock && typeof w.clock === 'object'
+    ? {
+      offsetMs: finiteOr(w.clock.offsetMs, 0),
+      lowMs: finiteOr(w.clock.lowMs, null),
+      highMs: finiteOr(w.clock.highMs, null),
+      samples: finiteOr(w.clock.samples, 0),
+      consistent: w.clock.consistent === true,
+    }
+    : null;
+  return {
+    runId,
+    method: w.method === 'reload' ? 'reload' : 'fetch',
+    backoffLevel: Math.max(0, Math.min(10, finiteOr(w.backoffLevel, 0))),
+    backoffUntil: finiteOr(w.backoffUntil, 0),
+    unknownStreak: Math.max(0, finiteOr(w.unknownStreak, 0)),
+    clockOffsetMs: Number.isFinite(w.clockOffsetMs) ? w.clockOffsetMs : null,
+    clock,
+    checks: Math.max(0, finiteOr(w.checks, 0)),
+    lastCheckAt: finiteOr(w.lastCheckAt, 0),
+    nextCheckAt: finiteOr(w.nextCheckAt, 0),
+    lastResult: WATCH_RESULTS.includes(w.lastResult) ? w.lastResult : null,
+    lastDetail: cleanText(w.lastDetail, 200),
+    lastPrice: Number.isFinite(w.lastPrice) ? w.lastPrice : null,
+    confirming: w.confirming === true,
+    firedAt: finiteOr(w.firedAt, 0),
+  };
+}
+
+async function onWatchReport(msg, sender) {
+  const state = await runStateForSender(sender);
+  if (!state || !ACTIVE_STATUSES.includes(state.status)) return { ok: false, error: 'Not the active run tab.' };
+  const watch = sanitizeWatch(msg.watch, state.runId);
+  if (watch) await chrome.storage.session.set({ [STORAGE_KEYS.WATCH]: watch });
+
+  const ev = msg.event;
+  if (ev && typeof ev === 'object' && typeof ev.text === 'string') {
+    const level = ev.level === 'warn' ? 'warn' : 'info';
+    await mutateRunState((s) => {
+      if (s.runId !== state.runId) return null;
+      pushEvent(s, level, cleanText(ev.text, 200));
+      return s;
+    });
+  }
+  if (msg.unreadable === true) {
+    await noticeWithCooldown(`unreadable-${state.runId}`, Infinity, "Ro-Bought can't read this page's stock",
+      "It can't tell whether the product is in stock, so it may miss the restock. Keep an eye on the tab yourself.");
+  }
+  return { ok: true };
+}
+
+async function onDropFired(msg, sender) {
+  const cfg = await loadConfig();
+  if (!cfg?.ok) return { ok: false, error: 'No valid configuration.' };
+  const state = await runStateForSender(sender);
+  if (!state) return { ok: false, error: 'Not the run tab.' };
+  let fired = false;
+  await mutateRunState((s) => {
+    if (s.status !== RUN_STATUS.WAITING || s.runId !== state.runId) return null;
+    // Sanity: the tab's clock correction is bounded, so a fire far before the drop is a bug.
+    if (Date.now() < cfg.config.dropTime - 11 * 60_000) return null;
+    const { burstIntervalSec, burstWindowSec } = cfg.config;
+    s.status = RUN_STATUS.WATCHING;
+    s.firedAt = Date.now();
+    s.burstUntil = s.firedAt + burstWindowSec * 1000;
+    s.message = `Drop time! Checking every ~${burstIntervalSec}s for ${burstWindowSec}s, then every ~${cfg.config.restockIntervalSec}s.`;
+    const offset = finiteOr(msg.clockOffsetMs, 0);
+    const shown = Math.abs(offset) >= 500 ? ` (store clock ${offset > 0 ? '+' : ''}${(offset / 1000).toFixed(1)}s)` : '';
+    pushEvent(s, 'info', `Fired for the drop${shown}.`);
+    fired = true;
+    return s;
+  });
+  return fired ? { ok: true } : { ok: false, error: 'Not waiting for a drop.' };
+}
+
+async function onAvailable(msg, sender) {
+  const state = await runStateForSender(sender);
+  if (!state) return { ok: false, error: 'Not the run tab.' };
+  const detail = cleanText(msg.detail || 'The product can be bought', 200);
+  const price = Number.isFinite(msg.price) ? msg.price : null;
+  let handedOff = false;
+  const next = await mutateRunState((s) => {
+    if (s.runId !== state.runId) return null;
+    if (s.status !== RUN_STATUS.WATCHING && s.status !== RUN_STATUS.WAITING) return null;
+    // Phase 3: no checkout engine yet, so hand the purchase to the user right away.
+    // Phase 4 switches this to EXECUTING.
+    s.status = RUN_STATUS.AWAITING_USER;
+    s.message = `In stock now — ${detail}${price !== null ? ` (${price.toFixed(2)})` : ''}. Add it to your cart and check out.`;
+    pushEvent(s, 'info', `In stock: ${detail}.`);
+    handedOff = true;
+    return s;
+  });
+  if (!handedOff) return { ok: false, error: 'Not watching.' };
+  notify('available', 'In stock — your turn!', next.message, true);
+  if (next.tabId != null) focusTab(next.tabId).catch(() => {});
+  return { ok: true };
+}
+
+chrome.alarms.onAlarm.addListener((alarm) => {
+  if (alarm.name === PREWARN_ALARM) prewarn().catch(logError);
+});
+
+async function prewarn() {
+  const s = await readRunState();
+  const waiting = s.status === RUN_STATUS.WAITING || (s.status === RUN_STATUS.PAUSED && s.pause?.from === RUN_STATUS.WAITING);
+  if (!waiting) return;
+  const { [STORAGE_KEYS.PRESENCE]: presence } = await chrome.storage.session.get(STORAGE_KEYS.PRESENCE);
+  const quiet = !presence || presence.tabId !== s.tabId || Date.now() - presence.at > STALE_AFTER_MS;
+  let message = 'Bring the retailer tab to the front and stay at your computer.';
+  if (s.status === RUN_STATUS.PAUSED) message = `Ro-Bought is paused (${s.pause?.label}). Sort it out and click Resume now.`;
+  else if (quiet) message = "Ro-Bought hasn't heard from the retailer tab recently. Reload the tab now.";
+  notify('prewarn', `Drop in ${PREWARN_MINUTES} minutes`, message, true);
+  if (s.tabId != null) focusTab(s.tabId).catch(() => {});
 }
 
 function sanitizeGuard(g) {
@@ -497,7 +663,7 @@ async function onPresence(msg, sender) {
   if (!ACTIVE_STATUSES.includes(state.status)) return { ok: true };
   if (visible) {
     clearNotification('hidden');
-  } else if (state.status !== RUN_STATUS.PAUSED) {
+  } else if (state.status !== RUN_STATUS.PAUSED && state.status !== RUN_STATUS.AWAITING_USER) {
     await noticeWithCooldown('hidden', HIDDEN_NOTICE_COOLDOWN_MS, 'Keep the retailer tab in front',
       'Chrome slows down background tabs, so Ro-Bought may react late. Bring the retailer tab back to the foreground.');
   }
@@ -570,7 +736,7 @@ async function watchdog() {
     await pauseRun({ kind: 'discarded', label: 'Chrome unloaded the retailer tab', signature: 'discarded' });
     return;
   }
-  if (s.status === RUN_STATUS.PAUSED) return;
+  if (s.status === RUN_STATUS.PAUSED || s.status === RUN_STATUS.AWAITING_USER) return; // a human is in charge
 
   const { [STORAGE_KEYS.PRESENCE]: presence } = await chrome.storage.session.get(STORAGE_KEYS.PRESENCE);
   const lastSeen = Math.max(presence?.tabId === s.tabId ? presence.at : 0, s.activeSince || 0);
@@ -609,6 +775,9 @@ const CONTENT_HANDLERS = {
   [MESSAGES.CONTENT_HELLO]: onContentHello,
   [MESSAGES.GUARD_STATUS]: onGuardStatus,
   [MESSAGES.PRESENCE]: onPresence,
+  [MESSAGES.WATCH_REPORT]: onWatchReport,
+  [MESSAGES.DROP_FIRED]: onDropFired,
+  [MESSAGES.AVAILABLE]: onAvailable,
   [MESSAGES.RESUME]: contentResume,
   [MESSAGES.DISARM]: contentDisarm,
 };
