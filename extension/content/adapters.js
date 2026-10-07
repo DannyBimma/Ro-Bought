@@ -22,15 +22,25 @@
   // Hard safety rules: never click these, whatever a preset or a taught button says.
   // ---------------------------------------------------------------------------
 
+  // "Buy now" / "Order now" on Amazon can be an instant purchase that skips the review page,
+  // bypassing the max-price, one-item and once-only checks. Ro-Bought never clicks them.
   const NEVER_CLICK_SELECTOR = [
-    '#buy-now-button', '[name="submit.buy-now"]', '[id*="one-click" i]', '[id*="oneclick" i]',
+    '#buy-now-button', '[name="submit.buy-now"]', '[id*="buy-now" i]', '[id*="buynow" i]',
+    '[name*="buy-now" i]', '[name*="buynow" i]', '[id*="one-click" i]', '[id*="oneclick" i]',
     '[name*="one-click" i]', '[name*="oneclick" i]', '[id^="turbo-checkout" i]', '[id*="prime-trial" i]',
   ].join(',');
-  const NEVER_CLICK_TEXT = /1-click|one-click|subscribe|free trial|start (?:your )?trial|try prime|join prime|sign up|add (?:a )?protection|add (?:a )?warranty|buy now/i;
+  const NEVER_CLICK_TEXT = /1-click|one-click|subscribe|free trial|start (?:your )?trial|try prime|join prime|sign up|add (?:a )?protection|add (?:a )?warranty|buy now|buy it now|(?<!pre-?)order now|instant (?:buy|purchase|checkout)/i;
 
-  /** True if Ro-Bought must never click this element (instant-buy, upsells, sign-ups). */
+  /**
+   * True if Ro-Bought must never click this element (instant-buy, upsells, sign-ups).
+   * Amazon draws a button as <span class="a-button"><input id=…><span>Label</span></span>: the
+   * visible label is a sibling of the real input, so the whole wrapper is checked.
+   */
   function neverClick(el, label) {
-    return !!el.closest(NEVER_CLICK_SELECTOR) || NEVER_CLICK_TEXT.test(label || '');
+    if (el.closest(NEVER_CLICK_SELECTOR)) return true;
+    const wrap = el.closest('.a-button');
+    if (wrap && (wrap.querySelector(NEVER_CLICK_SELECTOR) || NEVER_CLICK_TEXT.test(wrap.textContent || ''))) return true;
+    return NEVER_CLICK_TEXT.test(label || '');
   }
 
   // ---------------------------------------------------------------------------

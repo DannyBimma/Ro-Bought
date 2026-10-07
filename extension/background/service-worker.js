@@ -40,7 +40,8 @@ function idleState() {
     ackSignature: null, // a guard the user chose to "Resume anyway" past
     firedAt: null,      // scheduled drop: when the retailer tab fired
     burstUntil: null,   // scheduled drop: end of the fast-retry window
-    checkout: null,     // { stage, visits: {stage: n}, startedAt, ready }
+    checkout: null,     // { stage, visits: {stage: n}, startedAt, ready, cartPassed }
+    preflight: null,    // 'pending' | 'done' — the cart check made once per run, at arm
     purchaseLock: null, // { at, total } — set at most once per run, the moment before "Place order"
     events: [],
     updatedAt: Date.now(),
@@ -301,6 +302,7 @@ async function arm() {
     const next = idleState();
     next.events = s.events;
     next.status = baseActiveStatus(cfg.config);
+    next.preflight = 'pending'; // the retailer tab checks the cart once (see onPreflight)
     next.runId = crypto.randomUUID();
     next.armedAt = Date.now();
     next.activeSince = next.armedAt;
@@ -523,6 +525,7 @@ async function onContentHello(msg, sender) {
     return s;
   });
   reply.watch = await readWatch(state.runId);
+  reply.runTab = true;
   return reply;
 }
 
@@ -676,6 +679,7 @@ async function onCheckoutProgress(msg, sender) {
       }
     }
     c.stage = stage;
+    if (stage === 'cart' && msg.cartPassed === true) c.cartPassed = true; // survives Resume
     s.checkout = c;
     s.message = STAGE_MESSAGES[stage] || s.message;
     const note = typeof msg.note === 'string' ? cleanText(msg.note, 120) : '';
@@ -734,6 +738,10 @@ async function onClaimPurchase(msg, sender) {
       reply = { ok: false, error: 'Automatic purchase is off, so Ro-Bought stopped one click short' };
       return null;
     }
+    if (!s.checkout?.cartPassed) {
+      reply = { ok: false, error: 'Ro-Bought only places an order after it has checked the cart, so it did not click this' };
+      return null;
+    }
     const max = cfg.config.maxTotalPrice;
     if (max === null || total === null || total > max) {
       reply = { ok: false, error: `The order total (${total ?? 'unknown'}) is not within your max (${max ?? 'not set'}), so Ro-Bought did not place the order` };
@@ -772,6 +780,33 @@ async function onOrderPlaced(msg, sender) {
   clearNotification('handoff');
   clearNotification('paused');
   notify('completed', 'Order placed!', next.message, true);
+  return { ok: true };
+}
+
+/**
+ * Cart check at arm time: the retailer tab reads the cart once in the background. If other items
+ * are in it, say so now, while there's time to empty it, rather than pausing during the drop.
+ */
+async function onPreflight(msg, sender) {
+  const state = await runStateForSender(sender);
+  if (!state) return { ok: false, error: 'Not the run tab.' };
+  const items = Number.isInteger(msg.items) && msg.items >= 0 ? msg.items : null;
+  let warn = false;
+  await mutateRunState((s) => {
+    if (s.runId !== state.runId || s.preflight !== 'pending') return null;
+    s.preflight = 'done';
+    if (items !== null && items > 0) {
+      warn = true;
+      pushEvent(s, 'warn', `Your cart already has ${items} item${items === 1 ? '' : 's'}. Ro-Bought buys only this product and will pause at the cart until it's empty.`);
+    } else {
+      pushEvent(s, 'info', items === 0 ? 'Cart checked: empty.' : "Couldn't read the cart ahead of time; it will be checked during checkout.");
+    }
+    return s;
+  });
+  if (warn) {
+    notify('preflight', 'Empty your cart before the drop',
+      `Your cart has ${items} item${items === 1 ? '' : 's'}. Ro-Bought buys only this product, so it would pause at the cart. Remove them (on Amazon, "Save for later" works) now.`, true);
+  }
   return { ok: true };
 }
 
@@ -1007,6 +1042,7 @@ const CONTENT_HANDLERS = {
   [MESSAGES.CHECKOUT_HANDOFF]: onCheckoutHandoff,
   [MESSAGES.CLAIM_PURCHASE]: onClaimPurchase,
   [MESSAGES.ORDER_PLACED]: onOrderPlaced,
+  [MESSAGES.PREFLIGHT]: onPreflight,
   [MESSAGES.TEACH_SAVE]: (msg) => teachSave(msg),
   [MESSAGES.RESUME]: contentResume,
   [MESSAGES.DISARM]: contentDisarm,

@@ -10,9 +10,17 @@
   const TEXT_SCAN_LIMIT = 800;
 
   function labelOf(el) {
-    const raw = el.tagName === 'INPUT' ? el.value || el.getAttribute('aria-label') || '' : el.textContent || el.getAttribute('aria-label') || '';
+    let raw = el.tagName === 'INPUT' ? el.value || el.getAttribute('aria-label') || '' : el.textContent || el.getAttribute('aria-label') || '';
+    if (!raw.trim() && el.getAttribute('aria-labelledby')) {
+      raw = el.getAttribute('aria-labelledby').split(/\s+/)
+        .map((id) => el.ownerDocument.getElementById(id)?.textContent || '').join(' ');
+    }
+    if (!raw.trim()) raw = el.closest('.a-button')?.textContent || ''; // Amazon: label beside the input
     return raw.replace(/\s+/g, ' ').trim().slice(0, 80);
   }
+
+  /** What the user sees for a control: Amazon's near-transparent inputs are drawn by a wrapper. */
+  const visualOf = (el) => (el.matches('input.a-button-input') && el.closest('.a-button')) || el;
 
   function safeAll(root, selector) {
     try {
@@ -24,7 +32,7 @@
 
   /** For clicks: visible, enabled, and allowed. For reads (totals): just visible. */
   function usable(el, forClick) {
-    if (!isVisible(el, 2)) return false;
+    if (!isVisible(visualOf(el), 2)) return false;
     if (!forClick) return true;
     return !isDisabled(el) && !neverClick(el, labelOf(el));
   }
@@ -110,7 +118,29 @@
 
   /** The clickable element a click on `el` belongs to (e.g. the <button> around a <span>). */
   function clickable(el) {
-    return (el instanceof Element && el.closest(CLICKABLE)) || el;
+    if (!(el instanceof Element)) return el;
+    const wrap = el.closest('.a-button'); // Amazon: the real input sits beside the label
+    const inner = wrap && wrap.querySelector('input.a-button-input, input[type="submit"], button');
+    return inner || el.closest(CLICKABLE) || el;
+  }
+
+  /**
+   * Like find(), but ignores visibility: is a usable (enabled, allowed) control present at all?
+   * Tells "hidden behind a pop-up or a collapsed panel" apart from "not on the page".
+   */
+  function findPresent(doc, spec) {
+    const ok = (el) => !isDisabled(el) && !neverClick(el, labelOf(el));
+    for (const t of spec.taught || []) {
+      if (t.selector) for (const el of safeAll(doc, t.selector)) if (ok(el)) return el;
+    }
+    for (const sel of spec.presets || []) for (const el of safeAll(doc, sel)) if (ok(el)) return el;
+    if (spec.text) {
+      const list = doc.querySelectorAll(CLICKABLE);
+      for (let i = 0; i < Math.min(list.length, TEXT_SCAN_LIMIT); i++) {
+        if (spec.text.test(labelOf(list[i])) && ok(list[i])) return list[i];
+      }
+    }
+    return null;
   }
 
   /**
@@ -163,5 +193,5 @@
     return unique(sel) ? sel : null;
   }
 
-  RoBought.finder = Object.freeze({ find, waitFor, waitFind, clickable, buildSelector, labelOf });
+  RoBought.finder = Object.freeze({ find, findPresent, waitFor, waitFind, clickable, buildSelector, labelOf, CLICKABLE });
 })();

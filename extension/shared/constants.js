@@ -152,6 +152,7 @@
 
     // Buttons the user can teach (Options → Buttons, or ⚡ → Teach buttons on the store page).
     TEACH_FIELDS: [
+      { id: 'dismissPopup', label: 'Close a pop-up hiding Add to cart (optional)', where: 'product page' },
       { id: 'addToCart', label: 'Add to cart', where: 'product page' },
       { id: 'proceedToCheckout', label: 'Proceed to checkout', where: 'cart page' },
       { id: 'checkoutContinue', label: 'Continue / Use this address / Use this payment', where: 'checkout pages (up to 3)', multi: true },
@@ -185,6 +186,7 @@
       CHECKOUT_HANDOFF: 'CHECKOUT_HANDOFF',
       CLAIM_PURCHASE: 'CLAIM_PURCHASE',
       ORDER_PLACED: 'ORDER_PLACED',
+      PREFLIGHT: 'PREFLIGHT', // cart check at arm time (content -> service worker)
       // teach mode
       TEACH_OPEN: 'TEACH_OPEN',   // popup -> service worker -> store tab
       TEACH_SAVE: 'TEACH_SAVE',   // store tab -> service worker

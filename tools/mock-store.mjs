@@ -12,7 +12,8 @@
 //   /store/checkout/thankyou.html?order=…
 // Control
 //   /__control?stock=in|out&price=…&tax=…&dropIn=<s>&dropAt=<epoch ms>&skewMs=…&fail=429:2:5
-//              &extraItem=1&reviewCaptcha=1&placeFails=1&addFails=1&placeLabel=…&reset=1
+//              &extraItem=1&reviewCaptcha=1&bankCheck=1&placeFails=1&addFails=1&placeLabel=…
+//              &promo=simple|stubborn|off&reset=1
 //   /__control/log             recent requests (for checking polite intervals)
 
 const LOG_MAX = 2000;
@@ -23,7 +24,8 @@ const esc = (s) => String(s).replace(/[&<>"']/g, (c) => `&#${c.charCodeAt(0)};`)
 export function createMockStore() {
   const initial = () => ({
     stock: 'out', price: 499.99, tax: 30, dropAt: 0, skewMs: 0,
-    reviewCaptcha: false, placeFails: false, addFails: false,
+    reviewCaptcha: false, bankCheck: false, placeFails: false, addFails: false,
+    promo: '', // '' | 'simple' (has "No thanks") | 'stubborn' (only "Show me the deal")
     placeLabel: 'Place your order', // the final button's text (change it to test taught buttons)
   });
   let state = initial();
@@ -41,7 +43,8 @@ export function createMockStore() {
     for (const key of ['price', 'tax', 'dropAt', 'skewMs']) {
       if (patch[key] !== undefined && Number.isFinite(Number(patch[key]))) state[key] = Number(patch[key]);
     }
-    for (const key of ['reviewCaptcha', 'placeFails', 'addFails']) {
+    if (patch.promo !== undefined) state.promo = ['simple', 'stubborn'].includes(patch.promo) ? patch.promo : '';
+    for (const key of ['reviewCaptcha', 'bankCheck', 'placeFails', 'addFails']) {
       if (patch[key] !== undefined) state[key] = patch[key] === true || patch[key] === '1' || patch[key] === 'true';
     }
     if (typeof patch.placeLabel === 'string' && patch.placeLabel.trim()) state.placeLabel = patch.placeLabel.trim().slice(0, 40);
@@ -100,13 +103,38 @@ export function createMockStore() {
 <script type="application/ld+json">${JSON.stringify(ld).replace(/</g, '\\u003c')}</script></head>
 <body>${nav()}<main><h1>Mock Console 1TB</h1><p class="price">$${esc(state.price.toFixed(2))}</p>
 <p id="availability">${available ? 'In stock' : 'Out of stock'}</p>
-<form action="/store/cart/add" method="get">
+${adFrame()}
+${promoDialog()}
+<form id="atc-form" action="/store/cart/add" method="get"${state.promo ? ' style="display:none"' : ''}>
   <input type="hidden" name="sku" value="${SKU}">
   <label>Quantity <select name="quantity"><option value="1">1</option><option value="2">2</option></select></label>
   <button id="add-to-cart" type="submit"${available ? '' : ' disabled'}>Add to cart</button>
 </form>
 <form action="/store/buy-now" method="get"><button id="buy-now-button" type="submit"${available ? '' : ' disabled'}>Buy now</button></form>
+<form action="/store/order-now" method="get"><button id="order-now" type="submit"${available ? '' : ' disabled'}>Order now</button></form>
 </main></body></html>`;
+  }
+
+  /** Like Amazon's ad frames: visible, with a long encoded name that happens to contain "3ds". */
+  function adFrame() {
+    const name = `ape_Detail_ad_${'a1b2'.repeat(12)}x3dsq${'c3d4'.repeat(30)}`;
+    return `<iframe title="Advertisement" name="${name}" src="about:blank" width="300" height="250"></iframe>`;
+  }
+
+  /** A deal pop-up that hides Add to cart until it's dismissed. */
+  function promoDialog() {
+    if (!state.promo) return '';
+    const button = state.promo === 'simple'
+      ? '<button id="promo-close" type="button">No thanks</button>'
+      : '<button id="promo-ok" type="button">Show me the deal</button>';
+    return `<div id="promo" role="dialog" aria-modal="true" style="position:fixed;top:20%;left:20%;width:60%;padding:20px;background:#fff;border:2px solid #333;z-index:10">
+  <h2>Prime Big Deal Days</h2><p>Members save more on this item.</p>${button}</div>
+<script>
+  document.querySelector('#promo button').addEventListener('click', () => {
+    document.getElementById('promo').remove();
+    document.getElementById('atc-form').style.display = '';
+  });
+</script>`;
   }
 
   function spaPage() {
@@ -148,6 +176,9 @@ export function createMockStore() {
     const captcha = state.reviewCaptcha
       ? '<div id="px-captcha" style="width:300px;height:60px;border:1px solid #999">Press &amp; Hold</div>'
       : '';
+    const bank = state.bankCheck
+      ? '<iframe title="3-D Secure authentication" src="about:blank" width="400" height="400"></iframe>'
+      : '';
     return page('Review your order', `<h1>Review your order</h1>
       ${error ? `<p role="alert" class="error">${esc(error)}</p>` : ''}
       <section><h2>Ship to</h2><p>Jo Shopper, 1 Main St, Springfield</p></section>
@@ -156,7 +187,7 @@ export function createMockStore() {
       <div class="row"><span>Items:</span> <span>$${cartTotal().toFixed(2)}</span></div>
       <div class="row"><span>Estimated tax:</span> <span>$${state.tax.toFixed(2)}</span></div>
       <div class="row"><strong>Order total:</strong> <strong>$${orderTotal().toFixed(2)}</strong></div>
-      ${captcha}
+      ${captcha}${bank}
       <form action="/store/checkout/place" method="get"><button type="submit" id="place-order">${esc(state.placeLabel)}</button></form>`);
   }
 
@@ -241,6 +272,7 @@ export function createMockStore() {
         redirect(res, req, '/store/cart.html');
         break;
       }
+      case '/store/order-now':
       case '/store/buy-now': {
         // An instant purchase, like Amazon's 1-Click "Buy now". Ro-Bought must never press it.
         const id = `INSTANT-${1000 + orders.length + 1}`;

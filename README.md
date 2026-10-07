@@ -5,7 +5,7 @@ It watches **one product** from **one retailer** at any given time. The moment t
 the retailer's normal checkout in the user's own **logged-in session**, faster than you could
 click. It buys **one unit, once**, and then stops.
 
-> **Status:** Phase 4 of 5. Safety core, page guards, both triggers, and the checkout engine
+> **Status:** Phase 4 of 5 (plus 4.1 fixes from the first live dry runs). Safety core, page guards, both triggers, and the checkout engine
 > (presets for Amazon.com and Nintendo's US store, plus "Teach buttons" for any store). Google Alerts
 > and final polish come in Phase 5. See [docs/PLAN.md](docs/PLAN.md).
 
@@ -43,14 +43,23 @@ When the product can be bought, Ro-Bought clicks through the store's normal chec
 - **Automatic purchase (opt-in, needs a max price):** it clicks **Place order** only if all of
   these hold:
   - the order total is shown and is at or below your max;
-  - the cart holds exactly this one product, quantity 1;
+  - the cart was checked and holds exactly this one product, quantity 1;
   - it hasn't already clicked Place order in this run.
 
   That last check is a once-only lock, saved before the click, so a reload, crash or restart can
   never cause a second order. If the order doesn't confirm, it hands over to you and does not retry.
-- **What it never does:** type anything (cards, passwords, codes), click "Buy now" / 1-Click, accept
-  upsells, trials or warranties, or remove items from your cart. Anything unexpected pauses
-  (fix it and click **Resume**) or hands the purchase to you.
+- **What it never does:** type anything (cards, passwords, codes), click "Buy now" / "Order now" /
+  1-Click, accept upsells, trials or warranties, or remove items from your cart. Anything unexpected
+  pauses (fix it and click **Resume**) or hands the purchase to you.
+- **Why not "Buy now" / "Order now"?** On Amazon these can be an instant purchase that skips the
+  review page, and with it the max-price check, the one-item check and the once-only lock. So
+  Ro-Bought always goes through the cart, even when a quicker-looking button exists.
+- **Your cart must be empty.** When you arm, Ro-Bought reads your cart once in the background and
+  warns you straight away if anything is in it. On Amazon, "Save for later" moves items out of the
+  cart without deleting them. During checkout it pauses if the cart holds anything else.
+- **A pop-up hiding Add to cart** (for example a Prime deal promotion) is closed if it has an obvious
+  close / "No thanks" / "Not now" button. Otherwise Ro-Bought pauses so you can dismiss it. Teach
+  the pop-up's button ("Close a pop-up hiding Add to cart") and it's closed automatically next time.
 - If the item sells out again between "in stock" and "add to cart", it goes back to watching.
 
 ### Store presets and "Teach buttons"
@@ -66,6 +75,18 @@ When the product can be bought, Ro-Bought clicks through the store's normal chec
      button on the way. **Don't place the order.** **Test** shows what Ro-Bought would click.
 
   Taught buttons always win over the presets. Clear them in the options.
+
+  Tips:
+  - Each step has its own button. Don't teach one button for two steps; Ro-Bought warns if you do.
+  - **Proceed to checkout** is the cart page's button, and **Place order** is the final review page's
+    button.
+  - **Copy page report** (in the teach panel) copies a list of the buttons, pop-ups and frames
+    Ro-Bought sees on the current page: labels and ids only, no page text, digits masked. Paste it to
+    the developer when a step stalls.
+- **Guest checkout can't be automated.** It needs your address and card typed in, and Ro-Bought never
+  types those. For Nintendo, create a Nintendo Account with a saved address and payment method, and
+  sign in before the drop. A taught "Guest checkout" button is harmless for signed-in users (it isn't
+  on their page, so the built-in buttons are used), but it won't get a guest through checkout.
 
 ## What users must do during a drop
 
@@ -124,6 +145,8 @@ APIs (`tests/fake-chrome.js`). Node 22+ is required.
    - `placeFails=1`: "Place order" fails.
    - `addFails=1`: sold out at add-to-cart.
    - `placeLabel=Finish`: the final button has wording only a taught button matches.
+   - `promo=simple` / `promo=stubborn`: a deal pop-up hides Add to cart (with or without a "No thanks").
+   - `bankCheck=1`: a 3-D Secure frame on the final review.
    - `reset=1`: start over.
 6. `http://localhost:8080/__control` shows the store state, including the cart and how many orders were
    placed. `http://localhost:8080/__control/log` lists the requests the store received.
@@ -133,8 +156,10 @@ APIs (`tests/fake-chrome.js`). Node 22+ is required.
 The e2e test loads the extension into **Chrome for Testing**, serves the fixture pages in
 `tests/fixtures/` (CAPTCHA, queue, sign-in, event pages and so on) plus the mock store, and drives
 everything over the DevTools protocol. It runs a throwaway copy of the extension with the polite
-interval floors lowered so it finishes in about a minute and a half. Regular Chrome ignores
-`--load-extension`, so install Chrome for Testing once:
+interval floors lowered so it finishes in a few minutes. Regular Chrome ignores
+`--load-extension`, so install Chrome for Testing once. The harness launches it with
+`--use-mock-keychain`, so it never asks for your macOS login password. If an older run left a
+"Chromium Safe Storage" Keychain prompt, click Deny.
 
 ```sh
 npx @puppeteer/browsers install chrome@stable

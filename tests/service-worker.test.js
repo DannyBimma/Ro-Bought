@@ -450,6 +450,10 @@ async function startCheckout(over = {}) {
   assert.equal(runState().status, 'executing');
 }
 const progress = (stage, extra = {}) => send(MESSAGES.CHECKOUT_PROGRESS, content(runTab()), { stage, ...extra });
+const passCart = async () => {
+  await progress('cart');
+  await progress('cart', { cartPassed: true, entered: false, note: 'Cart checked: this product only, quantity 1.' });
+};
 
 test('checkout progress tracks stages and stops a loop after 3 visits', async () => {
   await startCheckout();
@@ -525,8 +529,11 @@ test('stop one click short: "ready" hand-off, then the user places the order -> 
 test('auto-purchase: the lock is granted once, only within the max price', async () => {
   await send(MESSAGES.RESET);
   await startCheckout({ stopBeforePlaceOrder: false, maxTotalPrice: 600 });
-  await progress('review');
   const claim = (total) => send(MESSAGES.CLAIM_PURCHASE, content(runTab()), { total });
+  assert.match((await claim(529.99)).error, /only places an order after it has checked the cart/);
+  await passCart();
+  assert.equal(runState().checkout.cartPassed, true);
+  await progress('review');
   assert.match((await claim(700)).error, /not within your max/);
   assert.match((await claim(null)).error, /not within your max/);
   assert.equal(runState().purchaseLock, null);
@@ -549,7 +556,8 @@ test('a confirmation page without the lock (while the bot is clicking) is not tr
 });
 
 test('disarming after "Place order" was clicked ends the run for good', async () => {
-  await send(MESSAGES.CLAIM_PURCHASE, content(runTab()), { total: 529.99 });
+  await passCart();
+  assert.equal((await send(MESSAGES.CLAIM_PURCHASE, content(runTab()), { total: 529.99 })).ok, true);
   await send(MESSAGES.DISARM);
   assert.equal(runState().status, 'aborted');
   assert.match(runState().message, /check your orders/i);
@@ -559,7 +567,8 @@ test('disarming after "Place order" was clicked ends the run for good', async ()
 test('a Chrome restart after "Place order" was clicked also ends the run for good', async () => {
   await send(MESSAGES.RESET);
   await startCheckout({ stopBeforePlaceOrder: false });
-  await send(MESSAGES.CLAIM_PURCHASE, content(runTab()), { total: 100 });
+  await passCart();
+  assert.equal((await send(MESSAGES.CLAIM_PURCHASE, content(runTab()), { total: 100 })).ok, true);
   await fake.chrome.runtime.onStartup.dispatch();
   assert.equal(runState().status, 'aborted');
   await send(MESSAGES.RESET);
@@ -625,4 +634,42 @@ test('teach: saves buttons into the config; continues append up to 3; clear remo
   assert.equal(fake.store.get(STORAGE_KEYS.CONFIG).selectors.placeOrder, null);
   // Content scripts cannot clear (options page only).
   assert.match((await send(MESSAGES.TEACH_CLEAR, content(runTab()), { field: 'placeOrder' })).error, /not allowed/);
+});
+
+test('a checked cart survives a pause + Resume (the lock still needs it, and gets it)', async () => {
+  await startCheckout({ stopBeforePlaceOrder: false });
+  await passCart();
+  await send(MESSAGES.CHECKOUT_HANDOFF, content(runTab()), { mode: 'pause', reason: 'Stuck', stage: 'checkout', path: '/x' });
+  await send(MESSAGES.RESUME);
+  assert.deepEqual(runState().checkout.visits, {});
+  assert.equal(runState().checkout.cartPassed, true);
+  assert.equal((await send(MESSAGES.CLAIM_PURCHASE, content(runTab()), { total: 10 })).ok, true);
+  await send(MESSAGES.DISARM);
+  await send(MESSAGES.RESET);
+});
+
+test('cart pre-flight at arm: warns once about other items, otherwise just logs', async () => {
+  await saveConfig();
+  await armFresh();
+  assert.equal(runState().preflight, 'pending');
+  assert.deepEqual(await send(MESSAGES.PREFLIGHT, content(runTab()), { items: 2 }), { ok: true });
+  assert.equal(runState().preflight, 'done');
+  assert.ok(runState().events.some((e) => e.level === 'warn' && /already has 2 items/.test(e.text)));
+  assert.match(notified('preflight').at(-1).message, /Save for later/);
+  const before = notified('preflight').length;
+  await send(MESSAGES.PREFLIGHT, content(runTab()), { items: 3 }); // only once per run
+  assert.equal(notified('preflight').length, before);
+
+  await armFresh();
+  await send(MESSAGES.PREFLIGHT, content(runTab()), { items: 0 });
+  assert.ok(runState().events.some((e) => /Cart checked: empty/.test(e.text)));
+  const other = await fake.chrome.tabs.create({ url: PRODUCT, active: false });
+  assert.match((await send(MESSAGES.PREFLIGHT, content(other.id), { items: 1 })).error, /Not the run tab/);
+  await send(MESSAGES.DISARM);
+});
+
+test('teach: the "close a pop-up" button can be taught', async () => {
+  const res = await send(MESSAGES.TEACH_SAVE, content(runTab()), { field: 'dismissPopup', selector: '#promo-close', label: 'No thanks' });
+  assert.equal(res.ok, true);
+  assert.deepEqual(res.selectors.dismissPopup, { selector: '#promo-close', label: 'No thanks' });
 });

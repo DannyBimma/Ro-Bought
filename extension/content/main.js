@@ -22,6 +22,8 @@
   let runConfig = null;   // validated config subset, from the service worker
   let savedWatch = null;  // watcher memory from earlier page loads of this run
   let watcherNote = '';   // the watcher's latest one-line status
+  let preflightRun = null; // run whose cart check this page already started
+  let introduced = false;  // the coordinator knows this tab as the run tab
   let observer = null;
   let checkTimer = null;
   let heartbeatTimer = null;
@@ -35,6 +37,15 @@
   // Guards and heartbeat run while the bot is (or may soon be) acting — not once the user
   // has taken over the purchase.
   const isGuarding = () => isActive() && state.status !== RUN_STATUS.AWAITING_USER;
+
+  /** Past the product page in a checkout: only then do card/bank (payment) checks apply. */
+  function inCheckout() {
+    if (!state?.checkout || !runConfig) return false;
+    const checkingOut = state.status === RUN_STATUS.EXECUTING
+      || (state.status === RUN_STATUS.PAUSED && state.pause?.from === RUN_STATUS.EXECUTING);
+    if (!checkingOut) return false;
+    return !RoBought.adapters.forUrl(runConfig.productUrl).isProductPage(location.href, runConfig.productUrl);
+  }
   const pageVisible = () => document.visibilityState === 'visible';
 
   // ---------------------------------------------------------------------------
@@ -64,7 +75,7 @@
     checkTimer = null;
     if (!isGuarding()) return;
     RoBought.overlay.ensureAttached();
-    const hit = RoBought.guards.detectBlocker(document, location);
+    const hit = RoBought.guards.detectBlocker(document, location, { checkout: inCheckout() });
     const signature = hit ? hit.signature : null;
     if (signature === lastGuardSignature) return;
     lastGuardSignature = signature;
@@ -201,6 +212,13 @@
   function applyState(next) {
     state = next && typeof next === 'object' ? next : null;
     flash = '';
+    // Arming opens the tab and then records it as the run tab; a fast page can say hello in
+    // between and be treated as a bystander. Re-introduce ourselves once we become the run tab.
+    if (!isRunTab()) introduced = false;
+    else if (!introduced && myTabId !== null) {
+      introduced = true;
+      hello().catch(() => {});
+    }
     if (state && !TERMINAL_STATUSES.includes(state.status)) dismissed = false;
     if (isGuarding()) startWatching();
     else stopWatching();
@@ -213,7 +231,36 @@
       watcherNote = '';
     }
     if (isActive()) RoBought.teach.close(); // no teaching during a run
+    runPreflight();
     renderOverlay();
+  }
+
+  /**
+   * Once per run, right after arming: read the cart page in the background so the user hears
+   * about other items in it now, not when the bot pauses at the cart during the drop.
+   */
+  async function runPreflight() {
+    if (!isActive() || !runConfig || state.preflight !== 'pending' || preflightRun === state.runId) return;
+    if (state.status !== RUN_STATUS.WATCHING && state.status !== RUN_STATUS.WAITING) return;
+    preflightRun = state.runId;
+    const adapter = RoBought.adapters.forUrl(runConfig.productUrl);
+    let items = null;
+    try {
+      const cartUrl = adapter.cartUrl(runConfig.productUrl, document);
+      if (cartUrl) {
+        const res = await fetch(cartUrl, { credentials: 'include', cache: 'no-store', redirect: 'follow', signal: AbortSignal.timeout(10_000) });
+        if (res.ok && RoBought.url.inScope(res.url, runConfig.productUrl)) {
+          const html = (await res.text()).slice(0, RoBought.constants.WATCH.MAX_HTML_CHARS);
+          const doc = new DOMParser().parseFromString(html, 'text/html'); // never runs scripts
+          if (!RoBought.guards.detectBlocker(doc, new URL(res.url), { static: true })) {
+            items = adapter.readCart(doc, runConfig.productUrl).items;
+          }
+        }
+      }
+    } catch {
+      // Unreadable (client-rendered cart, network): checked during checkout instead.
+    }
+    send(MESSAGES.PREFLIGHT, { items });
   }
 
   // Teach mode is opened by the service worker (popup → "Teach buttons").
@@ -253,6 +300,7 @@
       RoBought.ticketGuard.checkUrl(location.href) || RoBought.guards.detectTicketPage(document);
     const res = await send(MESSAGES.CONTENT_HELLO, { ticketReason, visible: pageVisible() });
     if (res && Number.isInteger(res.tabId)) myTabId = res.tabId;
+    introduced = !!res?.runTab;
     if (res && res.config && typeof res.config === 'object') runConfig = res.config;
     savedWatch = res && res.watch && typeof res.watch === 'object' ? res.watch : null;
   }
@@ -299,5 +347,8 @@
     applyState(stored[STORAGE_KEYS.RUN_STATE]);
   }
 
-  init().catch(() => teardown());
+  init().catch((e) => {
+    console.error('[Ro-Bought] content script failed to start:', e);
+    teardown();
+  });
 })();

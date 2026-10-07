@@ -6,6 +6,25 @@
 
   const { firstVisible, isVisible, textOf } = RoBought.dom;
 
+  // 3-D Secure: whole tokens only. A plain substring match on "3ds" fired on Amazon product
+  // pages, whose ad frames carry long encoded names that contain it by chance.
+  const THREEDS_TOKEN = /(?:^|[^a-z0-9])(?:3-?d-?s(?:ecure)?|three-?d-?s(?:ecure)?|3[- ]?d[- ]?secure)(?:[^a-z0-9]|$)/i;
+  const THREEDS_HOSTS = /(?:^|\.)(?:cardinalcommerce\.com|3dsecure\.io|arcot\.com|securecode\.com|wlp-acs\.com|netcetera\.com)$/i;
+  const NAME_MAX = 120; // longer frame names are encoded config blobs (ads), not 3-D Secure
+
+  function is3dsFrame(el) {
+    const src = el.getAttribute('src') || '';
+    try {
+      const u = new URL(src, location.href);
+      if (THREEDS_HOSTS.test(u.hostname) || THREEDS_TOKEN.test(u.pathname)) return true;
+    } catch {
+      // not a URL
+    }
+    const name = el.getAttribute('name') || '';
+    return [el.id, el.getAttribute('title') || '', name.length <= NAME_MAX ? name : '']
+      .some((v) => v && THREEDS_TOKEN.test(v));
+  }
+
   // A *visible* match means a human is needed. Hidden widgets (e.g. the invisible
   // reCAPTCHA badge many stores load on every page) don't count until they're shown.
   // `pageLevel` rules mark a whole challenge/block page served instead of the real one, so
@@ -62,14 +81,14 @@
 
     // Payment authentication and card entry — never automated
     {
+      // Payment rules are checkout-only (`scope`): card fields and bank checks mean nothing on a
+      // product page, and scoping them out removes a whole class of false alarms there.
       id: '3ds', kind: 'payment', label: 'Your bank is asking you to confirm the payment (3-D Secure)', min: 100,
-      selector: [
-        'iframe[src*="cardinalcommerce.com"]', 'iframe[name*="threeds" i]', 'iframe[id*="threeds" i]',
-        'iframe[name*="3ds" i]', 'iframe[src*="3dsecure" i]', 'iframe[title*="3d secure" i]', 'iframe[title*="3-d secure" i]',
-      ].join(','),
+      scope: 'checkout', selector: 'iframe', test: is3dsFrame,
     },
     {
       id: 'card-entry', kind: 'payment', label: 'Card details or a security code are being requested', min: 5,
+      scope: 'checkout',
       selector: [
         'input[autocomplete="cc-number"]', 'input[autocomplete="cc-csc"]', 'input[name*="cvv" i]', 'input[name*="cvc" i]',
         'input[id*="cvv" i]', 'input[name*="securitycode" i]', 'iframe[title*="card number" i]',
@@ -167,11 +186,23 @@
     return parts.join('\n');
   }
 
+  /** First visible element matching a rule (selector, plus its optional `test`). */
+  function ruleMatch(doc, rule) {
+    if (!rule.test) return firstVisible(doc, rule.selector, rule.min);
+    const list = doc.querySelectorAll(rule.selector);
+    for (let i = 0; i < Math.min(list.length, 60); i++) {
+      if (rule.test(list[i]) && isVisible(list[i], rule.min)) return list[i];
+    }
+    return null;
+  }
+
   /**
    * @param {Document} doc
    * @param {{hostname: string, pathname: string}} loc
-   * @param {{static?: boolean}} [opts] static: `doc` is fetched HTML with no layout — only
-   *   page-level markers count (a hidden password field in page source means nothing).
+   * @param {{static?: boolean, checkout?: boolean}} [opts]
+   *   static: `doc` is fetched HTML with no layout — only page-level markers count (a hidden
+   *   password field in page source means nothing).
+   *   checkout: the run is in checkout (past the product page), so payment checks apply.
    * @returns {{kind: string, label: string, rule: string, signature: string} | null}
    */
   function detectBlocker(doc = document, loc = location, opts = {}) {
@@ -184,9 +215,10 @@
       if (extra) return hit(extra, loc);
     }
     for (const rule of SELECTOR_RULES) {
+      if (rule.scope === 'checkout' && !opts.checkout) continue;
       const found = isStatic
         ? rule.pageLevel && doc.querySelector(rule.selector)
-        : firstVisible(doc, rule.selector, rule.min);
+        : ruleMatch(doc, rule);
       if (found) return hit(rule, loc);
     }
     const text = interstitialText(doc, isStatic);

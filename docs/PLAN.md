@@ -190,7 +190,7 @@ Each phase ends with a pause so you can review, change, and commit.
   Drives 8 new e2e steps covering polite spacing, back-off, hand-off, price ceiling, reload
   fallback, clock skew and burst.
 
-### Phase 4 — Checkout engine ✅ (this commit)
+### Phase 4 — Checkout engine ✅
 - **Stage machine** (`content/checkout.js`): each page load classifies itself, checking in this
   order: confirmation → product → interstitial → "added to cart" page → review (a Place order
   button is visible) → cart → checkout step. It then takes exactly one step. Single-page checkouts
@@ -232,6 +232,39 @@ Each phase ends with a pause so you can review, change, and commit.
   clicked once and never retried; a sold-out race → re-watch → buy; a teach pick that doesn't
   press the button; teach refusing "Buy now"; a taught button needed for unfamiliar wording;
   the options page and popup rendering.
+
+### Phase 4.1 — Fixes from the first live dry runs ✅ (this commit)
+Found on Amazon.com and the Nintendo US store with "Stop one click short" ticked:
+- **False "3-D Secure" pause on an Amazon product page.** Ad frames carry long encoded names that
+  contained "3ds" by chance.
+  - The bank-check rule now matches whole tokens in a frame's id, title, short name or address, plus
+    known 3-D Secure providers.
+  - Card and bank checks run only during checkout (past the product page).
+  - The e2e covers an Amazon-style ad frame on every product page and a real "3-D Secure" frame at review.
+- **Add to cart hidden behind a Prime deal pop-up.** Previously this was taken for "sold out" and
+  would have looped back to watching.
+  - The engine now tells "hidden" from "absent". It closes a pop-up via a taught button or an
+    obvious close / "No thanks" / "Not now", and otherwise pauses with a clear message.
+  - New teachable button: "Close a pop-up hiding Add to cart".
+- **"Order now" taught as Proceed to checkout and Place order.**
+  - "Order now", "Buy it now" and Amazon's `buy-now` ids are now never-click. "Pre-order now" is
+    still allowed.
+  - The check covers Amazon's button wrapper, where the visible label sits beside the real input.
+  - A page only counts as the final review after the cart was checked (or on a known checkout
+    address), and the service worker refuses the purchase lock until then.
+  - Teaching one button for two steps shows a warning.
+- **Other items in the Amazon cart.** Arming now reads the cart once in the background and warns
+  straight away, rather than pausing mid-drop.
+- **Nintendo guest checkout.** It can't be automated (it needs typed details); documented.
+  Signed-in checkout is unaffected by a taught "Guest checkout" button.
+- **Teach panel → Copy page report:** labels, ids, pop-ups and frames (no page text, digits masked),
+  for diagnosing live pages remotely.
+- **Robustness:**
+  - A tab that becomes the run tab after its first hello re-introduces itself. This closes an
+    arm-time race.
+  - Content-script start-up failures are logged instead of failing silently.
+  - The e2e launches Chrome for Testing with `--use-mock-keychain`, so it never prompts for the
+    macOS Keychain.
 
 ### Phase 5 — Alerts and polish
 - Google Alerts: build a good query, open `google.com/alerts` prefilled (the user confirms;

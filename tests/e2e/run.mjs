@@ -108,6 +108,9 @@ const chrome = spawn(CHROME, [
   `--load-extension=${extDir}`,
   `--disable-extensions-except=${extDir}`,
   '--remote-debugging-port=0',
+  // Never touch the macOS Keychain: otherwise each fresh test browser asks for the login
+  // password ("Chromium Safe Storage") and won't load pages until someone answers.
+  '--use-mock-keychain',
   '--no-first-run',
   '--no-default-browser-check',
   '--disable-search-engine-choice-screen',
@@ -633,7 +636,8 @@ try {
     assert.deepEqual(store.orders()[0].items.map((l) => [l.sku, l.qty]), [['console', 1]]);
     assert.equal(s.purchaseLock.total, 529.99);
     assert.match(s.message, /Order placed \(total 529\.99\)/);
-    assert.equal(store.requests((r) => r.path === '/store/buy-now').length, 0, 'never pressed "Buy now"');
+    assert.equal(store.requests((r) => r.path === '/store/buy-now' || r.path === '/store/order-now').length, 0, 'never pressed "Buy now" / "Order now"');
+    assert.ok(!s.events.some((e) => /3-D Secure/.test(e.text)), 'the ad frame (name contains "3ds") must not look like a bank check');
     console.log(`      in stock -> order placed: ${s.updatedAt - t0} ms`);
     assert.match((await sw('return await arm();')).error, /Reset for a new run/);
     assert.deepEqual(await sw('return await reset();'), { ok: true });
@@ -797,7 +801,81 @@ try {
     assert.deepEqual(await sw('return await reset();'), { ok: true });
   });
 
+  // -------------------------------------------------------------------------
+  // Phase 4.1: fixes from the live dry runs
+  // -------------------------------------------------------------------------
+
+  const instantBuys = (since) => store.requests((r) => r.t >= since && (r.path === '/store/buy-now' || r.path === '/store/order-now')).length;
+
+  await step('cart pre-flight: arming warns about other items already in the cart', async () => {
+    store.reset();
+    store.set({ extraItem: true });
+    await configure({});
+    await armRun('watching');
+    const s = await waitState((x) => x.preflight === 'done', 'cart pre-flight');
+    assert.ok(s.events.some((e) => /already has 1 item/.test(e.text)), 'warning logged');
+    assert.equal(s.status, 'watching');
+    await disarmRun();
+  });
+
+  await step('a deal pop-up hiding Add to cart: closed via "No thanks", purchase continues', async () => {
+    store.reset();
+    store.set({ promo: 'simple' });
+    const t0 = await armAndRestock(AUTO);
+    const s = await waitState((x) => x.status === 'completed', 'order placed', 25000);
+    assert.ok(s.events.some((e) => /Closed a pop-up \("No thanks"\)/.test(e.text)));
+    assert.equal(store.snapshot().orders, 1);
+    assert.equal(instantBuys(t0), 0);
+    assert.deepEqual(await sw('return await reset();'), { ok: true });
+  });
+
+  await step('a pop-up it cannot recognise: pauses (no sold-out loop); a taught close button fixes it', async () => {
+    store.reset();
+    store.set({ promo: 'stubborn' });
+    let t0 = await armAndRestock(AUTO);
+    const paused = await waitState((x) => x.status === 'paused', 'pause', 25000);
+    assert.equal(paused.pause.kind, 'checkout');
+    assert.match(paused.pause.label, /on the page but hidden/);
+    await sleep(2500);
+    const still = await state();
+    assert.equal(still.status, 'paused', 'stays paused instead of looping back to watching');
+    assert.ok(!still.events.some((e) => e.t >= t0 && /sold out again/.test(e.text)));
+    await disarmRun();
+
+    store.reset();
+    store.set({ promo: 'stubborn' });
+    t0 = await armAndRestock({ ...AUTO, selectors: { dismissPopup: { selector: '#promo-ok', label: 'Show me the deal' } } });
+    const s = await waitState((x) => x.status === 'completed', 'order placed with the taught close button', 25000);
+    assert.ok(s.events.some((e) => /Closed a pop-up \("Show me the deal"\)/.test(e.text)));
+    assert.equal(store.snapshot().orders, 1);
+    assert.deepEqual(await sw('return await reset();'), { ok: true });
+  });
+
+  await step('the "Order now" mix-up: taught for proceed + place order, never clicked; real buttons used', async () => {
+    store.reset();
+    const orderNow = { selector: '#order-now', label: 'Order now' };
+    const t0 = await armAndRestock({ ...AUTO, selectors: { proceedToCheckout: orderNow, placeOrder: orderNow } });
+    await waitState((x) => x.status === 'completed', 'order placed', 25000);
+    assert.equal(instantBuys(t0), 0, '"Order now" must never be pressed');
+    assert.equal(placeRequests(t0), 1);
+    assert.equal(store.orders().filter((o) => !o.instant).length, 1);
+    assert.deepEqual(await sw('return await reset();'), { ok: true });
+  });
+
+  await step('a real bank check (3-D Secure) during checkout still pauses before buying', async () => {
+    store.reset();
+    store.set({ bankCheck: true });
+    const t0 = await armAndRestock(AUTO);
+    const s = await waitState((x) => x.status === 'paused', 'pause', 25000);
+    assert.equal(s.pause.kind, 'payment');
+    assert.match(s.pause.label, /3-D Secure/);
+    assert.equal(placeRequests(t0), 0);
+    await disarmRun();
+  });
+
   await step('options page and popup render (taught buttons listed, no script errors)', async () => {
+    // Earlier steps replace the config, so save a known taught button for the page to list.
+    await configure({ selectors: { placeOrder: { selector: '#place-order', label: 'Place your order' } } });
     // Not new URL(...).origin: Node reports "null" as the origin of chrome-extension:// URLs.
     const extOrigin = swTarget.url.split('/').slice(0, 3).join('/');
     const check = async (path, expression) => {

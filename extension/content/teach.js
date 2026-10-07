@@ -17,6 +17,7 @@
     const presetId = RoBought.url.presetFor(session.config.productUrl);
     const adapter = RoBought.adapters.forUrl(session.config.productUrl);
     if (READ_FIELDS.has(field.id)) return 'built-in detection';
+    if (field.id === 'dismissPopup') return 'not taught (Ro-Bought tries close / "No thanks" buttons)';
     const presets = adapter.selectors[field.id] || [];
     return presets.length ? `built-in (${RoBought.url.PRESET_NAMES[presetId]})` : 'matched by button text';
   }
@@ -44,7 +45,10 @@
       title: 'Teach Ro-Bought the buttons',
       body: 'Visit each page (product, cart, checkout, final review) and pick the buttons there. Do not place the order.',
       hint: session.note,
-      actions: [{ id: 'done', label: 'Done', variant: 'primary' }],
+      actions: [
+        { id: 'done', label: 'Done', variant: 'primary' },
+        { id: 'report', label: 'Copy page report' },
+      ],
       rows: TEACH_FIELDS.map((f) => {
         const taught = (session.config.selectors || {})[f.id];
         const addMore = f.multi && Array.isArray(taught) && taught.length > 0;
@@ -67,6 +71,7 @@
   function onAction(id) {
     if (!session) return;
     if (id === 'done') close();
+    else if (id === 'report') copyReport();
     else if (id === 'cancel') stopPicking('Cancelled.');
     else if (id.startsWith('pick:')) startPicking(id.slice(5));
     else if (id.startsWith('test:')) test(id.slice(5));
@@ -154,11 +159,18 @@
       return;
     }
     const s = session;
+    // The same button for two different steps is almost always a mistake.
+    const twin = TEACH_FIELDS.find((f) => {
+      if (f.id === field.id) return false;
+      const v = (s.config.selectors || {})[f.id];
+      return [].concat(v || []).some((t) => t && selector && t.selector === selector);
+    });
     const res = await s.send(MESSAGES.TEACH_SAVE, { field: field.id, selector, label });
     if (session !== s) return;
     if (res?.ok && res.selectors) {
       s.config = { ...s.config, selectors: res.selectors };
-      stopPicking(`Saved ${field.label}: “${shortText(label || selector, 60)}”.`);
+      const warning = twin ? ` Note: that's the same button you taught for “${twin.label}”. Each step usually has its own button, so check this.` : '';
+      stopPicking(`Saved ${field.label}: “${shortText(label || selector, 60)}”.${warning}`);
     } else {
       stopPicking(res?.error || 'Could not save that.');
     }
@@ -173,10 +185,7 @@
     if (!field) return;
     const adapter = RoBought.adapters.forUrl(session.config.productUrl);
     const all = RoBought.checkout.specsFor(session.config, adapter);
-    const spec = {
-      addToCart: all.addToCart, proceedToCheckout: all.proceed, checkoutContinue: all.continue,
-      placeOrder: all.placeOrder, orderTotal: all.orderTotal, confirmation: all.confirmation,
-    }[fieldId];
+    const spec = specFor(all, fieldId);
     clearTimeout(session.testTimer);
     const found = spec && F.find(document, spec);
     if (!found) {
@@ -191,6 +200,95 @@
       RoBought.overlay.highlight(found.el, { tone: 'pick', label: `${field.label} (${found.via})` });
       session.note = `${field.label}: found ${what} (${found.via}).`;
       session.testTimer = setTimeout(() => RoBought.overlay.clearHighlight(), 4000);
+    }
+    render();
+  }
+
+  function specFor(all, fieldId) {
+    return {
+      dismissPopup: all.dismissPopup, addToCart: all.addToCart, proceedToCheckout: all.proceed,
+      checkoutContinue: all.continue, placeOrder: all.placeOrder, orderTotal: all.orderTotal,
+      confirmation: all.confirmation,
+    }[fieldId];
+  }
+
+  // ---------------------------------------------------------------------------
+  // Page report: what Ro-Bought sees on this page, to paste to the developer.
+  // Button/frame descriptions only — no page text, digits masked.
+  // ---------------------------------------------------------------------------
+
+  const RELEVANT = /cart|bag|basket|checkout|check out|order|buy|place|purchase|pay|continue|guest|sign|close|dismiss|thanks|not now|deal|prime|ship|deliver|address|payment/i;
+  const mask = (v, n = 50) => String(v || '').replace(/\d{3,}/g, '#').replace(/\s+/g, ' ').trim().slice(0, n);
+
+  function describe(el) {
+    const tag = el.tagName.toLowerCase();
+    const id = el.id ? `#${mask(el.id, 40)}` : '';
+    const name = el.getAttribute('name') ? `[name=${mask(el.getAttribute('name'), 40)}]` : '';
+    const cls = [...el.classList].slice(0, 2).map((c) => `.${mask(c, 30)}`).join('');
+    const label = F.labelOf(el);
+    const flags = [
+      RoBought.dom.isVisible(el.closest('.a-button') || el, 2) ? 'visible' : 'hidden',
+      RoBought.adapters.isDisabled(el) ? 'disabled' : '',
+      RoBought.adapters.neverClick(el, label) ? 'NEVER-CLICK' : '',
+    ].filter(Boolean).join(' ');
+    return `${tag}${id}${name}${cls} "${mask(label)}" ${flags}`;
+  }
+
+  function pageReport() {
+    const cfg = session.config;
+    const adapter = RoBought.adapters.forUrl(cfg.productUrl);
+    const all = RoBought.checkout.specsFor(cfg, adapter);
+    const guard = RoBought.guards.detectBlocker(document, location, { checkout: true });
+    const lines = [
+      'Ro-Bought page report (button and frame details only; check it before sharing)',
+      `v${chrome.runtime.getManifest().version} · preset ${RoBought.url.presetFor(cfg.productUrl)} · ${location.hostname}${mask(location.pathname, 80)}`,
+      `page type: ${RoBought.checkout.pageTypeFor(cfg) || 'unrecognised'} · guard: ${guard ? `${guard.kind}/${guard.rule}` : 'none'}`,
+      '',
+      'fields:',
+    ];
+    for (const f of TEACH_FIELDS) {
+      const spec = specFor(all, f.id);
+      const found = spec && F.find(document, spec);
+      const hidden = !found && spec && !spec.read && F.findPresent(document, spec);
+      lines.push(`  ${f.id}: ${found ? `${found.via} → ${describe(found.el)}` : hidden ? `HIDDEN → ${describe(hidden)}` : 'not found'}`);
+    }
+    lines.push('', 'buttons:');
+    let n = 0;
+    for (const el of document.querySelectorAll(F.CLICKABLE)) {
+      const label = F.labelOf(el);
+      if (!RELEVANT.test(`${label} ${el.id} ${el.getAttribute('name') || ''}`)) continue;
+      lines.push(`  ${describe(el)}`);
+      if (++n >= 40) break;
+    }
+    lines.push('', 'pop-ups:');
+    for (const d of document.querySelectorAll('[role="dialog"], [role="alertdialog"], [aria-modal="true"], .a-popover-modal, .a-sheet-web')) {
+      if (!RoBought.dom.isVisible(d, 50)) continue;
+      const buttons = [...d.querySelectorAll(F.CLICKABLE)].slice(0, 6).map((b) => `"${mask(F.labelOf(b), 30)}"`).join(', ');
+      lines.push(`  ${d.tagName.toLowerCase()}${d.id ? `#${mask(d.id, 40)}` : ''} buttons: ${buttons || '—'}`);
+    }
+    lines.push('', 'frames (visible, 100px+):');
+    for (const f of document.querySelectorAll('iframe')) {
+      if (!RoBought.dom.isVisible(f, 100)) continue;
+      let src = '';
+      try {
+        const u = new URL(f.getAttribute('src') || '', location.href);
+        src = `${u.hostname}${mask(u.pathname, 40)}`;
+      } catch {
+        src = '?';
+      }
+      lines.push(`  iframe${f.id ? `#${mask(f.id, 30)}` : ''} name=${mask(f.getAttribute('name') || '', 30)} title=${mask(f.title, 30)} src=${src}`);
+    }
+    return lines.join('\n');
+  }
+
+  async function copyReport() {
+    const text = pageReport();
+    try {
+      await navigator.clipboard.writeText(text);
+      session.note = 'Copied a page report (button and frame details only). Paste it to the developer.';
+    } catch {
+      console.info(text); // fallback: visible in DevTools
+      session.note = "Couldn't copy (click the page once, then try again). The report is also in this tab's DevTools console.";
     }
     render();
   }

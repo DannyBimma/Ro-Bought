@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "Ro-Bought",
   "short_name": "Ro-Bought",
-  "version": "0.4.0",
+  "version": "0.4.1",
   "description": "Personal purchase assistant: watches one product and runs your own checkout the moment it can be bought. One account, one unit, once.",
   "minimum_chrome_version": "116",
   "icons": {

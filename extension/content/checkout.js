@@ -42,6 +42,7 @@
     const taught = config.selectors || {};
     const one = (v) => (v ? [v] : []);
     return {
+      dismissPopup: { taught: one(taught.dismissPopup) }, // only ever a button the user taught
       addToCart: { taught: one(taught.addToCart), presets: adapter.selectors.addToCart, text: TEXT.addToCart },
       proceed: { taught: one(taught.proceedToCheckout), presets: adapter.selectors.proceedToCheckout, text: TEXT.proceed },
       continue: { taught: taught.checkoutContinue || [], presets: adapter.selectors.checkoutContinue, text: TEXT.continue },
@@ -64,7 +65,10 @@
     const reason = adapter.interstitial(url, document);
     if (reason) return { type: 'interstitial', reason };
     if (adapter.isAddedPage(url, document)) return { type: 'added' };
-    if (F.find(document, s.placeOrder)) return { type: 'review' };
+    // "Place order" only counts after the cart was checked (or on a known checkout address),
+    // so a look-alike button on another page (e.g. "Order now") can never be taken for it.
+    const pastCart = !!ctx.state.checkout?.cartPassed || adapter.isCheckoutPage(url, document);
+    if (pastCart && F.find(document, s.placeOrder)) return { type: 'review' };
     if (adapter.isCartPage(url, document)) return { type: 'cart' };
     if (adapter.isCheckoutPage(url, document) || F.find(document, s.continue)) return { type: 'checkout' };
     return null;
@@ -128,9 +132,56 @@
     return field.value === '1';
   }
 
+  const POPUPS = '[role="dialog"], [role="alertdialog"], [aria-modal="true"], .a-popover-modal, .a-modal-scroller, .a-sheet-web';
+  const CLOSERS = '[aria-label*="close" i], [aria-label*="dismiss" i], [data-action="a-popover-close"], [data-action="a-sheet-close"], .a-button-close, button[title*="close" i]';
+  const CLOSE_TEXT = /^(?:no,? thanks|not now|maybe later|close|dismiss|got it|continue shopping|×|✕)$/i;
+  const HIDDEN = 'hidden';
+
+  /** Clicks a taught "close the pop-up" button if one is showing. */
+  async function dismissTaught(ctl, s) {
+    const found = F.find(document, s.dismissPopup);
+    if (!found) return false;
+    found.el.click();
+    await progress(ctl, 'product', { note: `Closed a pop-up ("${F.labelOf(found.el) || 'taught button'}").`, entered: false });
+    return true;
+  }
+
+  /**
+   * A visible pop-up may be hiding Add to cart (e.g. an Amazon deal promotion). Click its close
+   * control: an explicit close/dismiss button or "No thanks"/"Not now". Never anything else.
+   */
+  async function dismissGeneric(ctl) {
+    const dialogs = document.querySelectorAll(POPUPS);
+    for (let i = 0; i < Math.min(dialogs.length, 8); i++) {
+      if (!RoBought.dom.isVisible(dialogs[i], 50)) continue;
+      const candidates = dialogs[i].querySelectorAll(`${CLOSERS}, ${F.CLICKABLE}`);
+      for (const el of candidates) {
+        const label = F.labelOf(el);
+        if (!el.matches(CLOSERS) && !CLOSE_TEXT.test(label)) continue;
+        if (!RoBought.dom.isVisible(el, 2) || RoBought.adapters.neverClick(el, label)) continue;
+        el.click();
+        await progress(ctl, 'product', { note: `Closed a pop-up ("${label || 'close'}").`, entered: false });
+        return true;
+      }
+    }
+    return false;
+  }
+
   async function stepProduct(ctl, adapter) {
     const s = specs(ctl.ctx, adapter);
-    const found = await F.waitFind(document, s.addToCart, CHECKOUT.FIND_TIMEOUT_MS, ctl.ac.signal);
+    const signal = ctl.ac.signal;
+    await dismissTaught(ctl, s);
+
+    // Visible → go. Present but hidden → a pop-up or a collapsed panel. Absent → sold out.
+    const probe = () => F.find(document, s.addToCart) || (F.findPresent(document, s.addToCart) ? HIDDEN : null);
+    let found = await F.waitFor(probe, CHECKOUT.FIND_TIMEOUT_MS, signal);
+    if (found === HIDDEN) found = (await F.waitFind(document, s.addToCart, 1500, signal)) || HIDDEN; // still rendering?
+    if (found === HIDDEN && ((await dismissTaught(ctl, s)) || (await dismissGeneric(ctl)))) {
+      found = (await F.waitFind(document, s.addToCart, 3000, signal)) || HIDDEN;
+    }
+    if (found === HIDDEN) {
+      return handoff(ctl, 'pause', 'Add to cart is on the page but hidden (a pop-up or a deal panel may be covering it). Make it visible, then click Resume. Tip: teach the pop-up\'s close button and Ro-Bought will close it next time', 'product');
+    }
     if (!found) {
       // Sold out again (or not quite live yet): go back to watching rather than give up.
       await progress(ctl, 'product', { soldOut: true, entered: false });
@@ -174,6 +225,12 @@
     if (cart.qty !== null && cart.qty > 1) {
       return handoff(ctl, 'pause', `The cart quantity is ${cart.qty}. Set it to 1, then click Resume`, 'cart');
     }
+    // Recorded by the coordinator: "Place order" is only ever allowed after this point.
+    await progress(ctl, 'cart', {
+      note: cart.items === 1 ? 'Cart checked: this product only, quantity 1.' : 'Cart contents could not be read; continuing.',
+      entered: false,
+      cartPassed: true,
+    });
     const s = specs(ctl.ctx, adapter);
     const proceed = await F.waitFind(document, s.proceed, CHECKOUT.FIND_TIMEOUT_MS, ctl.ac.signal);
     if (!proceed) {
@@ -420,5 +477,11 @@
     ran = false;
   }
 
-  RoBought.checkout = Object.freeze({ sync, stop, shutdown, revive, specsFor });
+  /** For page reports: what the engine would take this page for (outside a run). */
+  function pageTypeFor(config) {
+    const adapter = RoBought.adapters.forUrl(config.productUrl);
+    return classify({ config, state: { checkout: { cartPassed: true } } }, adapter)?.type || null;
+  }
+
+  RoBought.checkout = Object.freeze({ sync, stop, shutdown, revive, specsFor, pageTypeFor });
 })();
