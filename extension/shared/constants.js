@@ -158,7 +158,7 @@
       MAX_CONTINUES_PER_PAGE: 3,
     },
 
-    // Buttons the user can teach (Options → Buttons, or ⚡ → Teach buttons on the store page).
+    // Buttons the user can teach (Options → Buttons, or 🤖 → Teach buttons on the store page).
     TEACH_FIELDS: [
       // A click that reveals Add to cart: a pop-up's close button, or a buying option such as
       // Amazon's "regular price" radio during a Prime deal. (Id kept for saved configs.)

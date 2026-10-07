@@ -19,7 +19,7 @@
       padding: 10px 12px;
     }
     header { display: flex; align-items: center; gap: 8px; }
-    .bolt { color: #ffd60a; font-size: 15px; }
+    .logo { font-size: 15px; line-height: 1; }
     .name { font-weight: 700; flex: 1; }
     .pill {
       font-size: 10px; font-weight: 700; letter-spacing: 0.05em; text-transform: uppercase;
@@ -100,7 +100,7 @@
     const toggle = el('button', 'icon', '–');
     toggle.dataset.action = 'collapse';
     toggle.title = 'Collapse';
-    header.append(el('span', 'bolt', '⚡'), el('span', 'name', 'Ro-Bought'), pill, toggle);
+    header.append(el('span', 'logo', '🤖'), el('span', 'name', 'Ro-Bought'), pill, toggle);
 
     const title = el('p', 'title');
     const body = el('p', 'body');

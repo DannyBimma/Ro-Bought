@@ -7,24 +7,32 @@ import { dirname, join } from 'node:path';
 
 const OUT = join(dirname(fileURLToPath(import.meta.url)), '..', 'extension', 'icons');
 const BG = [22, 101, 82];     // deep teal
-const FG = [255, 214, 10];    // amber bolt
-// Lightning bolt polygon in unit coordinates (0..1).
-const BOLT = [[0.58, 0.12], [0.26, 0.56], [0.48, 0.56], [0.40, 0.88], [0.74, 0.42], [0.52, 0.42]];
+const FG = [255, 214, 10];    // amber robot
 
-function inPolygon(x, y, poly) {
-  let inside = false;
-  for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
-    const [xi, yi] = poly[i];
-    const [xj, yj] = poly[j];
-    if ((yi > y) !== (yj > y) && x < ((xj - xi) * (y - yi)) / (yj - yi) + xi) inside = !inside;
-  }
-  return inside;
-}
-
-function inRoundedSquare(x, y, r) {
-  const cx = Math.min(Math.max(x, r), 1 - r);
-  const cy = Math.min(Math.max(y, r), 1 - r);
+// Shapes in unit coordinates (0..1).
+function inRoundRect(x, y, x0, y0, x1, y1, r) {
+  if (x < x0 || x > x1 || y < y0 || y > y1) return false;
+  const cx = Math.min(Math.max(x, x0 + r), x1 - r);
+  const cy = Math.min(Math.max(y, y0 + r), y1 - r);
   return (x - cx) ** 2 + (y - cy) ** 2 <= r * r;
+}
+const inCircle = (x, y, cx, cy, r) => (x - cx) ** 2 + (y - cy) ** 2 <= r * r;
+const inRoundedSquare = (x, y, r) => inRoundRect(x, y, 0, 0, 1, 1, r);
+
+// The robot (🤖): head, antenna, ears in amber; eyes and mouth cut out to the background.
+function inRobot(x, y) {
+  const body =
+    inRoundRect(x, y, 0.24, 0.34, 0.76, 0.80, 0.12) || // head
+    inRoundRect(x, y, 0.465, 0.20, 0.535, 0.36, 0.02) || // antenna stem
+    inCircle(x, y, 0.5, 0.17, 0.065) ||                 // antenna tip
+    inRoundRect(x, y, 0.15, 0.48, 0.25, 0.66, 0.03) ||  // left ear
+    inRoundRect(x, y, 0.75, 0.48, 0.85, 0.66, 0.03);    // right ear
+  if (!body) return false;
+  const cutout =
+    inCircle(x, y, 0.39, 0.53, 0.075) ||                // left eye
+    inCircle(x, y, 0.61, 0.53, 0.075) ||                // right eye
+    inRoundRect(x, y, 0.37, 0.66, 0.63, 0.72, 0.025);   // mouth
+  return !cutout;
 }
 
 const CRC_TABLE = new Uint32Array(256).map((_, n) => {
@@ -59,7 +67,7 @@ function render(size) {
           const x = (px + (sx + 0.5) / SS) / size;
           const y = (py + (sy + 0.5) / SS) / size;
           if (!inRoundedSquare(x, y, 0.22)) continue;
-          if (inPolygon(x, y, BOLT)) fg++;
+          if (inRobot(x, y)) fg++;
           else bg++;
         }
       }

@@ -222,7 +222,7 @@ Each phase ends with a pause so you can review, change, and commit.
   - **Nintendo US:** cart at `/us/cart/`, everything else generic. Its sign-in on
     `accounts.nintendo.com` pauses as off-site.
   - Both are best-effort and unverified against the live sites, so do a dry run first.
-- **Teach mode** (`content/teach.js`): ⚡ → Teach buttons opens a panel on the store page with
+- **Teach mode** (`content/teach.js`): 🤖 → Teach buttons opens a panel on the store page with
   Pick and Test per button. Pick swallows the page's pointer and click events in the capture
   phase, so nothing is pressed. It refuses never-click buttons. Selectors prefer stable ids, test
   ids and names over position paths. The options page lists and clears taught buttons. They're
