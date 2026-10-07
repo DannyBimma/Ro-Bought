@@ -18,6 +18,9 @@
       PRESENCE: 'presence',
       NOTICES: 'notices',
       WATCH: 'watch', // watcher telemetry + memory that must survive page reloads
+      // chrome.storage.local, separate from the run config (editable while a run is active)
+      ALERT_SETTINGS: 'alertSettings', // { sound, query, feedUrl } — written by the options page
+      ALERT_STATE: 'alertState',       // feed polling memory — written by the service worker only
     },
 
     CONTENT_SCRIPT_ID: 'robought-retailer',
@@ -44,6 +47,11 @@
 
     WATCHDOG_ALARM: 'robought-watchdog',
     PREWARN_ALARM: 'robought-prewarn',
+    ALERTS_ALARM: 'robought-alerts',
+    ALERTS_POLL_MINUTES: 30,
+    ALERTS_KEEP_ITEMS: 20,  // recent alert items shown in the options page
+    ALERTS_KEEP_SEEN: 300,  // ids remembered so an item is announced once
+    SOUND_KINDS: ['attention', 'success'],
     HEARTBEAT_MS: 30_000,
     STALE_AFTER_MS: 100_000,
     HIDDEN_NOTICE_COOLDOWN_MS: 60_000,
@@ -189,6 +197,13 @@
       CLAIM_PURCHASE: 'CLAIM_PURCHASE',
       ORDER_PLACED: 'ORDER_PLACED',
       PREFLIGHT: 'PREFLIGHT', // cart check at arm time (content -> service worker)
+      // notifications, alerts, activity log (options -> service worker)
+      ALERTS_SAVED: 'ALERTS_SAVED',
+      ALERTS_CHECK: 'ALERTS_CHECK',
+      TEST_SOUND: 'TEST_SOUND',
+      CLEAR_LOG: 'CLEAR_LOG',
+      // service worker -> offscreen document
+      PLAY_SOUND: 'PLAY_SOUND',
       // teach mode
       TEACH_OPEN: 'TEACH_OPEN',   // popup -> service worker -> store tab
       TEACH_SAVE: 'TEACH_SAVE',   // store tab -> service worker

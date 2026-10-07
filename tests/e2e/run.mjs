@@ -917,6 +917,22 @@ try {
     await disarmRun();
   });
 
+  // -------------------------------------------------------------------------
+  // Phase 5: sound, alerts, reminders, activity
+  // -------------------------------------------------------------------------
+
+  await step('alert sound plays from an offscreen document', async () => {
+    const res = await sw("return await playSound('attention', { force: true });");
+    console.log(`      sound: ${JSON.stringify(res)}`);
+    assert.equal(res.ok, true, JSON.stringify(res));
+    const { targetInfos } = await cdp.send('Target.getTargets');
+    assert.ok(targetInfos.some((t) => t.url.endsWith('/offscreen/offscreen.html')), 'offscreen document exists');
+    const again = await sw("return await playSound('success', { force: true });");
+    assert.equal(again.ok, true);
+    const count = (await cdp.send('Target.getTargets')).targetInfos.filter((t) => t.url.endsWith('/offscreen/offscreen.html')).length;
+    assert.equal(count, 1, 'reuses one offscreen document');
+  });
+
   await step('options page and popup render (taught buttons listed, no script errors)', async () => {
     // Earlier steps replace the config, so save a known taught button for the page to list.
     await configure({ selectors: { placeOrder: { selector: '#place-order', label: 'Place your order' } } });
@@ -946,14 +962,44 @@ try {
         await sw(`await chrome.tabs.remove(${tabId}); return true;`).catch(() => {});
       }
     };
+    // Recent alert results to render: one real article, one hostile link that must stay plain text.
+    await sw(`await chrome.storage.local.set({
+      alertSettings: { sound: true, query: '', feedUrl: 'https://www.google.com/alerts/feeds/01234567890123456789/98765432109876543210' },
+      alertState: { feedUrl: 'https://www.google.com/alerts/feeds/01234567890123456789/98765432109876543210', initialized: true,
+        seen: ['x1', 'x2'], lastCheckAt: Date.now(), lastError: null,
+        items: [
+          { id: 'x1', title: 'Console X restock news', url: 'https://news.example.com/x1', published: '2026-10-07T12:00:00Z' },
+          { id: 'x2', title: '<img src=x onerror=alert(1)>', url: 'javascript:alert(1)', published: '' },
+        ] },
+    }); return true;`);
     const options = await check('options/options.html', `(() => {
       const items = [...document.querySelectorAll('#taughtList li')].map((li) => li.textContent);
       if (!items.length || !document.getElementById('productUrl').value) return null;
-      return { items, preset: document.getElementById('presetName').textContent, url: document.getElementById('productUrl').value };
+      const alerts = [...document.querySelectorAll('#alertItems li')];
+      if (alerts.length < 2) return null;
+      return {
+        items,
+        preset: document.getElementById('presetName').textContent,
+        url: document.getElementById('productUrl').value,
+        links: [...document.querySelectorAll('#alertItems a')].map((a) => a.href),
+        alertTexts: alerts.map((li) => li.textContent),
+        injected: document.querySelectorAll('#alertItems img').length,
+        logEntries: document.querySelectorAll('#log li').length,
+        calendarDisabled: document.getElementById('addCalendar').disabled,
+        query: document.getElementById('alertQuery').value,
+        feed: document.getElementById('feedUrl').value,
+      };
     })()`);
     assert.ok(options.items.some((t) => t.includes('#place-order')), options.items.join(' | '));
     assert.match(options.preset, /Generic store/);
     assert.equal(options.url, STORE_PRODUCT);
+    assert.deepEqual(options.links, ['https://news.example.com/x1'], 'only the http(s) article becomes a link');
+    assert.ok(options.alertTexts.some((t) => t.startsWith('<img')), 'hostile title shown as text');
+    assert.equal(options.injected, 0, 'no markup injected');
+    assert.ok(options.logEntries >= 1);
+    assert.equal(options.calendarDisabled, true, 'no scheduled drop → calendar buttons disabled');
+    assert.equal(options.feed, 'https://www.google.com/alerts/feeds/01234567890123456789/98765432109876543210');
+    await sw("await chrome.storage.local.remove(['alertSettings', 'alertState']); await chrome.alarms.clear('robought-alerts'); return true;");
 
     const popup = await check('popup/popup.html', `(() => {
       const pill = document.getElementById('statusPill').textContent;

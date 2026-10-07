@@ -5,7 +5,7 @@ const { readFileSync } = require('node:fs');
 const { join } = require('node:path');
 const vm = require('node:vm');
 
-const SHARED = ['namespace.js', 'constants.js', 'url-utils.js', 'ticket-guard.js', 'config.js', 'timing.js', 'availability.js'];
+const SHARED = ['namespace.js', 'constants.js', 'url-utils.js', 'ticket-guard.js', 'config.js', 'timing.js', 'availability.js', 'alerts.js'];
 
 if (!globalThis.RoBought) {
   for (const file of SHARED) {

@@ -48,7 +48,11 @@ function createFakeChrome({ extensionId = 'testextensionid' } = {}) {
   const tabs = new Map();
   const alarms = new Map();
   let nextTabId = 1;
-  const calls = { keepAwake: [], badge: [], notifications: [], cleared: [], focused: [], reloaded: [], tabMessages: [], openOptions: 0 };
+  const calls = {
+    keepAwake: [], badge: [], notifications: [], cleared: [], focused: [], reloaded: [], tabMessages: [],
+    openOptions: 0, offscreenCreated: 0, runtimeMessages: [],
+  };
+  let offscreenOpen = false;
 
   const onChanged = event();
   const local = storageArea('local', onChanged);
@@ -120,6 +124,22 @@ function createFakeChrome({ extensionId = 'testextensionid' } = {}) {
       onInstalled: event(),
       onStartup: event(),
       openOptionsPage: () => { calls.openOptions++; return Promise.resolve(); },
+      // Extension-wide messages sent by the service worker (here: to the offscreen document).
+      sendMessage: async (msg) => {
+        calls.runtimeMessages.push(msg);
+        if (!offscreenOpen) throw new Error('Could not establish connection. Receiving end does not exist.');
+        return { ok: true, kind: msg.kind };
+      },
+      getContexts: async ({ contextTypes }) => (contextTypes.includes('OFFSCREEN_DOCUMENT') && offscreenOpen ? [{ contextType: 'OFFSCREEN_DOCUMENT' }] : []),
+    },
+    offscreen: {
+      createDocument: async ({ url, reasons }) => {
+        if (offscreenOpen) throw new Error('Only a single offscreen document may be created.');
+        if (!reasons.includes('AUDIO_PLAYBACK') || !url.startsWith('offscreen/')) throw new Error('bad offscreen args');
+        offscreenOpen = true;
+        calls.offscreenCreated++;
+      },
+      closeDocument: async () => { offscreenOpen = false; },
     },
     storage: { onChanged, local, session },
     action: {
@@ -148,6 +168,7 @@ function createFakeChrome({ extensionId = 'testextensionid' } = {}) {
     },
     permissions: {
       contains: async ({ origins }) => origins.every((o) => granted.has(o)),
+      remove: async ({ origins }) => { for (const o of origins) granted.delete(o); return true; },
       onRemoved: event(),
     },
     tabs: tabsApi,

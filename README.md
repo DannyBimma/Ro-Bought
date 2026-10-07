@@ -5,9 +5,8 @@ It watches **one product** from **one retailer** at any given time. The moment t
 the retailer's normal checkout in the user's own **logged-in session**, faster than you could
 click. It buys **one unit, once**, and then stops.
 
-> **Status:** Phase 4 of 5 (plus 4.1 fixes from the first live dry runs). Safety core, page guards, both triggers, and the checkout engine
-> (presets for Amazon.com and Nintendo's US store, plus "Teach buttons" for any store). Google Alerts
-> and final polish come in Phase 5. See [docs/PLAN.md](docs/PLAN.md).
+> **Status:** All 5 phases complete (v0.5.0). The build plan is in [docs/PLAN.md](docs/PLAN.md) and
+> the security review in [SECURITY.md](SECURITY.md).
 
 ## Install (unpacked)
 
@@ -95,6 +94,24 @@ When the product can be bought, Ro-Bought clicks through the store's normal chec
   sign in before the drop. A taught "Guest checkout" button is harmless for signed-in users (it isn't
   on their page, so the built-in buttons are used), but it won't get a guest through checkout.
 
+## Notifications: sound, Google Alerts and reminders
+
+All in the options page under **Notifications**. You can change them even while a run is active.
+
+- **Sound:** a short alert when Ro-Bought needs you (a pause, or the final click), finds stock, or
+  places an order. **Test sound** plays it. Switch it off if you prefer silence.
+- **Google Alerts:** hear about a drop or restock the moment it's announced.
+  1. **Copy and open Google Alerts** opens Google Alerts with a ready-made search for your product
+     (also copied to your clipboard). Click **Create alert** for email alerts.
+  2. Optional: to get alerts in Chrome as well, choose **Show options → Deliver to → RSS feed**,
+     create the alert, and paste the RSS link into Ro-Bought. It checks the feed every 30 minutes and
+     notifies you of new results. Clicking a notification opens the article.
+- **Reminders:** for a scheduled drop, **Add to Google Calendar** or **Download .ics** (Apple Calendar,
+  Outlook) creates an event from 10 minutes before the drop with an alarm. Ro-Bought also notifies you
+  two minutes before the drop.
+- **Activity:** the options page shows the full activity log, with **Copy log** for sharing when
+  something looks wrong.
+
 ## What users must do during a drop
 
 - Keep **Chrome open** and the retailer tab **in the foreground**. Chrome slows down timers in
@@ -119,12 +136,30 @@ When the product can be bought, Ro-Bought clicks through the store's normal chec
 - Polite polling. Restock checks run every ≥20 s (default 45 s ±20 % jitter), retries after a
   drop run every ≥2 s within a capped window, and the bot backs off on HTTP 429/503.
 
+## Troubleshooting
+
+- **"Ro-Bought can't reach the retailer tab":** the tab was closed, discarded, or the computer slept.
+  Reload the store tab (or Disarm and Arm again).
+- **It paused and I don't know why:** read the pause message in the ⚡ panel or the popup, and the
+  **Activity** log in the options. Pauses always say what to do next.
+- **A checkout step stalls on a store:** teach that step's button (⚡ → **Teach buttons**). If it still
+  stalls, use **Copy page report** in the teach panel and share it with the developer.
+- **Add to cart is "hidden":** the store is showing a pop-up or a buying option (such as a Prime deal)
+  over it. Pick the regular-price option or close the pop-up, then Resume. Teach it as "Click first,
+  before Add to cart" to make it automatic.
+- **"Your cart already has N items":** empty the cart before the drop (on Amazon, "Save for later").
+- **No sound:** check the Notifications switch and **Test sound**, and that your Mac isn't muted.
+- **The Google Alerts feed shows an error:** paste the feed link again and click **Save notification
+  settings**. Chrome asks for access to Google Alerts feeds once.
+- **e2e tests show a macOS Keychain prompt:** click Deny. The test launcher uses `--use-mock-keychain`
+  so it shouldn't appear.
+
 ## Development
 
 There's no build step and no dependencies. Plain JavaScript runs as-is.
 
 ```sh
-npm test          # unit tests: guards, config, timing, availability, service worker logic
+npm test          # unit tests: guards, config, timing, availability, alerts, service worker logic
 npm run e2e       # end-to-end in a real browser (needs CHROME_PATH, see below)
 npm run serve     # fixtures + mock store on http://localhost:8080 for trying things by hand
 npm run icons     # regenerate extension/icons/*.png

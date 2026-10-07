@@ -1,6 +1,6 @@
 {
   "name": "ro-bought",
-  "version": "0.4.1",
+  "version": "0.5.0",
   "private": true,
   "description": "Unpacked MV3 Chrome extension: one buyer, one product, one unit, once.",
   "license": "GPL-3.0-only",

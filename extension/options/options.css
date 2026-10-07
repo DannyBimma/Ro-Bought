@@ -10,3 +10,12 @@ header { margin-bottom: 16px; }
 .taught li .what { flex: 1; min-width: 0; }
 .taught code { font-size: 12px; overflow-wrap: anywhere; color: var(--muted); }
 .taught button { padding: 3px 10px; font-size: 12px; }
+.inline-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; }
+.inline-actions button { padding: 5px 10px; font-size: 13px; }
+h3 { font-size: 15px; margin-top: 16px; }
+.steps { padding-left: 20px; margin: 4px 0 12px; }
+.steps li { margin-bottom: 4px; }
+.alert-items, .log { margin: 8px 0 0; padding-left: 18px; max-height: 320px; overflow-y: auto; }
+.alert-items li, .log li { margin-bottom: 4px; overflow-wrap: anywhere; }
+.log li[data-level="warn"] { color: #b45309; }
+.log li[data-level="error"] { color: var(--danger); }

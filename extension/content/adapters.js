@@ -114,11 +114,15 @@
   }
 
   /** A link to the cart in the page (header), for stores without a known cart URL. */
+  // A plain cart page only: "/cart", "/basket/", "/store/cart.html". Not "/cart/clear" or
+  // "/cart?action=empty", which could change the cart just by being visited.
+  const CART_PAGE_PATH = /\/(?:cart|basket|bag)(?:\.(?:html?|php|aspx?))?\/?$/i;
+
   function genericCartUrl(doc) {
     for (const a of doc.querySelectorAll('a[href]')) {
       try {
         const u = new URL(a.getAttribute('href'), location.href);
-        if (u.origin === location.origin && CART_URL.test(u.pathname)) return u.href;
+        if (u.origin === location.origin && !u.search && CART_PAGE_PATH.test(u.pathname)) return u.href;
       } catch {
         // ignore malformed hrefs
       }

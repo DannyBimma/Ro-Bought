@@ -233,7 +233,7 @@ Each phase ends with a pause so you can review, change, and commit.
   press the button; teach refusing "Buy now"; a taught button needed for unfamiliar wording;
   the options page and popup rendering.
 
-### Phase 4.1 — Fixes from the first live dry runs ✅ (this commit)
+### Phase 4.1 — Fixes from the first live dry runs ✅
 Found on Amazon.com and the Nintendo US store with "Stop one click short" ticked:
 - **False "3-D Secure" pause on an Amazon product page.** Ad frames carry long encoded names that
   contained "3ds" by chance.
@@ -270,11 +270,31 @@ Found on Amazon.com and the Nintendo US store with "Stop one click short" ticked
   - The e2e launches Chrome for Testing with `--use-mock-keychain`, so it never prompts for the
     macOS Keychain.
 
-### Phase 5 — Alerts and polish
-- Google Alerts: build a good query, open `google.com/alerts` prefilled (the user confirms;
-  there is no Alerts API). Optionally watch the alert's **RSS feed** URL (a
-  `google.com/alerts/feeds/*` optional permission, polled every 30 min) and send a
-  notification when there are new items.
-- "Add drop to Google Calendar" link for scheduled drops.
-- Offscreen-document audible alert.
-- Activity log viewer, README hardening, a final security pass.
+### Phase 5 — Alerts and polish ✅ (this commit)
+- **Google Alerts** (`shared/alerts.js`; there is no Alerts API):
+  - A suggested restock/release query, opened on google.com/alerts (also copied to the clipboard).
+  - An optional **RSS feed** link (`https://www.google.com/alerts/feeds/…` only; optional host
+    permission for that path, requested on save and removed when cleared).
+  - The service worker polls every 30 minutes without cookies. The first check is a quiet baseline;
+    each new result is announced once, with up to 3 notifications and a summary.
+  - Clicking a notification opens the real article (unwrapped from Google's redirect, `http(s)`
+    only). Recent results are listed in the options page.
+- **Reminders:** an "Add to Google Calendar" link and a downloadable `.ics` (10 min before the
+  drop, with an alarm), on top of the existing 2-minute pre-drop notification.
+- **Sound alert:**
+  - Played by an offscreen document (`AUDIO_PLAYBACK`, created on demand, auto-closed by Chrome
+    when silent), with tones synthesised as WAV so no audio file ships.
+  - "Attention" plays on stock found, a pause, a hand-off or the pre-drop warning; "success" plays
+    on an order placed.
+  - On by default, with Test sound and an off switch.
+- **Options:** a Notifications card (separate from the run settings, so it's editable mid-run) and an
+  Activity card (full log, Copy, Clear). The calendar buttons stay usable during a run.
+- **README:** notifications and troubleshooting sections.
+- **Final security review** ([SECURITY.md](../SECURITY.md)): threat model, permissions, entry points,
+  stored data. Two fixes: a linear-time feed parser (the regex version went quadratic on malformed
+  feeds) and a stricter generic cart-link heuristic (no `/cart/clear`-style links).
+- **Tests:**
+  - Unit: alert helpers (query, feed validation, Atom parsing with hostile input, calendar and
+    `.ics`), and the sound, feed-polling and log paths in the service worker.
+  - e2e: offscreen sound in real Chrome; the options page rendering alerts (hostile titles stay
+    text, `javascript:` links aren't linked), the log and the calendar button state.

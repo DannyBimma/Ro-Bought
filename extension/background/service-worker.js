@@ -11,13 +11,15 @@ importScripts(
   '../shared/url-utils.js',
   '../shared/ticket-guard.js',
   '../shared/config.js',
+  '../shared/alerts.js',
 );
 
 const {
   STORAGE_KEYS, RUN_STATUS, TERMINAL_STATUSES, ACTIVE_STATUSES, MESSAGES,
   CONTENT_SCRIPT_ID, CONTENT_SCRIPT_FILES, EVENT_LOG_MAX, WATCHDOG_ALARM, PREWARN_ALARM,
   PREWARN_MINUTES, STALE_AFTER_MS, HIDDEN_NOTICE_COOLDOWN_MS, STALE_NOTICE_COOLDOWN_MS,
-  CONTENT_GUARD_KINDS, PAUSE_HINTS, WATCH_RESULTS, CHECKOUT,
+  CONTENT_GUARD_KINDS, PAUSE_HINTS, WATCH_RESULTS, CHECKOUT, ALERTS_ALARM, ALERTS_POLL_MINUTES,
+  ALERTS_KEEP_ITEMS, ALERTS_KEEP_SEEN, SOUND_KINDS,
 } = RoBought.constants;
 
 const EXTENSION_ORIGIN = self.location.origin;
@@ -181,9 +183,160 @@ async function noticeWithCooldown(key, cooldownMs, title, message) {
 chrome.notifications.onClicked.addListener(async (notificationId) => {
   if (!notificationId.startsWith('robought-')) return;
   chrome.notifications.clear(notificationId);
+  if (notificationId.startsWith('robought-alert-')) {
+    await openAlertLink(notificationId);
+    return;
+  }
   const state = await readRunState();
   if (state.tabId != null) await focusTab(state.tabId).catch(() => {});
 });
+
+// ---------------------------------------------------------------------------
+// Sound — played by an offscreen document (MV3 service workers can't play audio).
+// Chrome closes an AUDIO_PLAYBACK offscreen document after ~30 s of silence.
+// ---------------------------------------------------------------------------
+
+let offscreenCreating = null;
+async function ensureOffscreen() {
+  const existing = await chrome.runtime.getContexts({ contextTypes: ['OFFSCREEN_DOCUMENT'] });
+  if (existing.length) return;
+  if (!offscreenCreating) {
+    offscreenCreating = chrome.offscreen.createDocument({
+      url: 'offscreen/offscreen.html',
+      reasons: ['AUDIO_PLAYBACK'],
+      justification: 'Play a short alert sound when Ro-Bought needs the user or an order is placed.',
+    }).finally(() => {
+      offscreenCreating = null;
+    });
+  }
+  await offscreenCreating;
+}
+
+async function readAlertSettings() {
+  const { [STORAGE_KEYS.ALERT_SETTINGS]: st } = await chrome.storage.local.get(STORAGE_KEYS.ALERT_SETTINGS);
+  return st && typeof st === 'object' ? st : {};
+}
+
+/** Plays 'attention' or 'success' unless the user turned sounds off. Never throws. */
+async function playSound(kind, { force = false } = {}) {
+  try {
+    if (!force && (await readAlertSettings()).sound === false) return { ok: false, skipped: true };
+    await ensureOffscreen();
+    const res = await chrome.runtime.sendMessage({ target: 'offscreen', type: MESSAGES.PLAY_SOUND, kind: SOUND_KINDS.includes(kind) ? kind : 'attention' });
+    return res || { ok: false, error: 'No answer from the sound player.' };
+  } catch (e) {
+    console.warn('[Ro-Bought] sound failed:', e);
+    return { ok: false, error: String(e?.message || e) };
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Google Alerts feed: poll every 30 minutes, announce new results once
+// ---------------------------------------------------------------------------
+
+const ALERT_LINKS_KEY = 'alertLinks'; // storage.session: notification id -> article URL
+
+function freshAlertState(feedUrl) {
+  return { feedUrl, initialized: false, seen: [], items: [], lastCheckAt: 0, lastError: null };
+}
+
+async function ensureAlertsAlarm() {
+  const feedUrl = RoBought.alerts.parseFeedUrl((await readAlertSettings()).feedUrl || '');
+  if (!feedUrl) {
+    await chrome.alarms.clear(ALERTS_ALARM);
+    return;
+  }
+  if (!(await chrome.alarms.get(ALERTS_ALARM))) {
+    await chrome.alarms.create(ALERTS_ALARM, { periodInMinutes: ALERTS_POLL_MINUTES, delayInMinutes: ALERTS_POLL_MINUTES });
+  }
+}
+
+chrome.alarms.onAlarm.addListener((alarm) => {
+  if (alarm.name === ALERTS_ALARM) pollAlerts().catch(logError);
+});
+
+let alertsPolling = null; // one poll at a time
+function pollAlerts() {
+  if (!alertsPolling) {
+    alertsPolling = pollAlertsNow().finally(() => {
+      alertsPolling = null;
+    });
+  }
+  return alertsPolling;
+}
+
+async function pollAlertsNow() {
+  const feedUrl = RoBought.alerts.parseFeedUrl((await readAlertSettings()).feedUrl || '');
+  if (!feedUrl) return { ok: false, error: 'No Google Alerts feed is set.' };
+  const { [STORAGE_KEYS.ALERT_STATE]: saved } = await chrome.storage.local.get(STORAGE_KEYS.ALERT_STATE);
+  const state = saved && saved.feedUrl === feedUrl ? saved : freshAlertState(feedUrl);
+  const save = () => chrome.storage.local.set({ [STORAGE_KEYS.ALERT_STATE]: state });
+
+  if (!(await chrome.permissions.contains({ origins: [RoBought.alerts.FEED_PERMISSION] }))) {
+    state.lastError = 'Access to Google Alerts feeds was not granted. Save the feed again in the options.';
+    await save();
+    return { ok: false, error: state.lastError };
+  }
+  try {
+    // credentials: 'omit' — the feed URL itself is the key; no Google cookies are sent.
+    const res = await fetch(feedUrl, { cache: 'no-store', credentials: 'omit', redirect: 'follow', signal: AbortSignal.timeout(15_000) });
+    if (!res.ok) throw new Error(`Google answered HTTP ${res.status}`);
+    if (!res.url.startsWith('https://www.google.com/alerts/feeds/')) throw new Error('Google redirected the feed somewhere unexpected');
+    const entries = RoBought.alerts.parseAtom((await res.text()).slice(0, 2_000_000));
+    const seen = new Set(state.seen);
+    const fresh = entries.filter((e) => !seen.has(e.id));
+    const now = Date.now();
+    const first = !state.initialized;
+    state.initialized = true;
+    state.items = [...fresh.map((e) => ({ ...e, seenAt: now })), ...state.items].slice(0, ALERTS_KEEP_ITEMS);
+    state.seen = [...fresh.map((e) => e.id), ...state.seen].slice(0, ALERTS_KEEP_SEEN);
+    state.lastCheckAt = now;
+    state.lastError = null;
+    await save();
+    if (first) {
+      notify('alert-connected', 'Google Alert connected', `Ro-Bought checks it every ${ALERTS_POLL_MINUTES} minutes and will tell you about new results (${entries.length} so far).`);
+    } else if (fresh.length) {
+      await announceAlerts(fresh);
+    }
+    return { ok: true, total: entries.length, fresh: first ? 0 : fresh.length };
+  } catch (e) {
+    state.lastCheckAt = Date.now();
+    state.lastError = String(e?.message || e).slice(0, 200);
+    await save();
+    return { ok: false, error: state.lastError };
+  }
+}
+
+async function announceAlerts(fresh) {
+  const { [ALERT_LINKS_KEY]: links = {} } = await chrome.storage.session.get(ALERT_LINKS_KEY);
+  const shown = fresh.slice(0, 3);
+  for (const [i, item] of shown.entries()) {
+    const id = `alert-${Date.now().toString(36)}-${i}`;
+    if (item.url) links[`robought-${id}`] = item.url;
+    notify(id, 'Google Alert: new result', item.title);
+  }
+  if (fresh.length > shown.length) {
+    notify('alert-more', 'Google Alerts', `${fresh.length - shown.length} more new results. See Ro-Bought's options.`);
+  }
+  const recent = Object.fromEntries(Object.entries(links).slice(-20)); // keep the map small
+  await chrome.storage.session.set({ [ALERT_LINKS_KEY]: recent });
+  playSound('attention');
+}
+
+async function openAlertLink(notificationId) {
+  const { [ALERT_LINKS_KEY]: links = {} } = await chrome.storage.session.get(ALERT_LINKS_KEY);
+  const url = RoBought.alerts.articleUrl(links[notificationId] || '');
+  if (url) await chrome.tabs.create({ url });
+  else chrome.runtime.openOptionsPage();
+}
+
+async function clearLog() {
+  await mutateRunState((s) => {
+    s.events = [];
+    return s;
+  });
+  return { ok: true };
+}
 
 // ---------------------------------------------------------------------------
 // Content-script registration (only for the configured retailer site)
@@ -416,6 +569,7 @@ async function pauseRun(guard, { focus = true } = {}) {
   if (!paused) return { ok: true, ignored: true };
 
   notify('paused', 'Ro-Bought paused — your turn', `${guard.label}. ${PAUSE_HINTS[guard.kind] || ''}`, true);
+  playSound('attention');
   if (focus && state.tabId != null && guard.kind !== 'tab_closed') {
     focusTab(state.tabId).catch(() => {});
   }
@@ -631,6 +785,7 @@ async function onAvailable(msg, sender) {
   });
   if (!started) return { ok: false, error: 'Not watching.' };
   notify('available', 'In stock — Ro-Bought is checking out', 'Watch the retailer tab. Ro-Bought will hand over if it needs you.');
+  playSound('attention');
   if (next.tabId != null) focusTab(next.tabId).catch(() => {});
   return { ok: true };
 }
@@ -713,6 +868,7 @@ async function onCheckoutHandoff(msg, sender) {
   });
   if (!handedOff) return { ok: false, error: 'Not checking out.' };
   notify('handoff', ready ? 'Ready — your click' : 'Ro-Bought: your turn', next.message, true);
+  playSound('attention');
   if (next.tabId != null) focusTab(next.tabId).catch(() => {});
   return { ok: true };
 }
@@ -780,6 +936,7 @@ async function onOrderPlaced(msg, sender) {
   clearNotification('handoff');
   clearNotification('paused');
   notify('completed', 'Order placed!', next.message, true);
+  playSound('success');
   return { ok: true };
 }
 
@@ -890,6 +1047,7 @@ async function prewarn() {
   if (s.status === RUN_STATUS.PAUSED) message = `Ro-Bought is paused (${s.pause?.label}). Sort it out and click Resume now.`;
   else if (quiet) message = "Ro-Bought hasn't heard from the retailer tab recently. Reload the tab now.";
   notify('prewarn', `Drop in ${PREWARN_MINUTES} minutes`, message, true);
+  playSound('attention');
   if (s.tabId != null) focusTab(s.tabId).catch(() => {});
 }
 
@@ -1029,6 +1187,14 @@ const PAGE_HANDLERS = {
   [MESSAGES.CONFIG_SAVED]: async () => ({ ok: true, ...(await syncContentScripts()) }),
   [MESSAGES.TEACH_OPEN]: () => teachOpen(),
   [MESSAGES.TEACH_CLEAR]: (msg) => teachClear(msg),
+  [MESSAGES.ALERTS_SAVED]: async () => {
+    await ensureAlertsAlarm();
+    const feed = RoBought.alerts.parseFeedUrl((await readAlertSettings()).feedUrl || '');
+    return feed ? pollAlerts() : { ok: true };
+  },
+  [MESSAGES.ALERTS_CHECK]: () => pollAlerts(),
+  [MESSAGES.TEST_SOUND]: (msg) => playSound(msg.kind === 'success' ? 'success' : 'attention', { force: true }),
+  [MESSAGES.CLEAR_LOG]: () => clearLog(),
 };
 
 const CONTENT_HANDLERS = {
@@ -1109,5 +1275,6 @@ chrome.permissions.onRemoved.addListener(async ({ origins = [] }) => {
   await disarm('Site access for the retailer was removed.');
 });
 
-// Re-apply badge/keep-awake/watchdog each time the worker wakes up.
+// Re-apply badge/keep-awake/watchdog (and the alerts alarm) each time the worker wakes up.
 readRunState().then(applySideEffects).catch(logError);
+ensureAlertsAlarm().catch(logError);

@@ -54,6 +54,10 @@
               <label for="dropTime">Drop date and time</label>
               <input id="dropTime" name="dropTime" type="datetime-local" step="1">
               <div class="hint" id="dropTimeHint"></div>
+              <div class="inline-actions">
+                <button type="button" id="addCalendar" data-always>Add to Google Calendar</button>
+                <button type="button" id="downloadIcs" data-always>Download .ics</button>
+              </div>
             </div>
             <div class="field">
               <label for="fireOffsetMs">Fire offset (ms)</label>
@@ -128,6 +132,56 @@
       </div>
       <p class="small muted">Saving asks Chrome for access to <em>only</em> the retailer's site. Any previously granted retailer is revoked.</p>
     </form>
+
+    <!-- Separate from the run settings: editable while a run is active. -->
+    <form id="alertsForm" class="card" novalidate>
+      <h2>Notifications</h2>
+      <div class="field">
+        <label class="check">
+          <input id="sound" type="checkbox" checked>
+          <span>Play a sound when Ro-Bought needs you, finds stock, or places an order.</span>
+        </label>
+        <div class="inline-actions"><button type="button" id="testSound">Test sound</button></div>
+      </div>
+
+      <h3>Google Alerts</h3>
+      <p class="small muted">Hear about a drop or restock the moment it's announced. Google Alerts has no
+        API, so Ro-Bought fills in the search for you and you click <strong>Create alert</strong>.</p>
+      <div class="field">
+        <label for="alertQuery">Search to watch</label>
+        <input id="alertQuery" type="text" maxlength="300" autocomplete="off" spellcheck="false">
+        <div class="hint">Filled in from the product name. Edit it if you like.</div>
+        <div class="inline-actions"><button type="button" id="openAlerts">Copy and open Google Alerts</button></div>
+      </div>
+      <ol class="small muted steps">
+        <li>On Google Alerts, the search is already filled in (it's also on your clipboard).</li>
+        <li>For alerts by email: click <strong>Create alert</strong>. Done.</li>
+        <li>For alerts here, in Chrome: click <strong>Show options</strong> → <strong>Deliver to</strong> →
+          <strong>RSS feed</strong> → <strong>Create alert</strong>. Then copy the RSS icon's link next to the
+          alert and paste it below.</li>
+      </ol>
+      <div class="field">
+        <label for="feedUrl">Google Alerts RSS link <span class="muted">(optional)</span></label>
+        <input id="feedUrl" type="url" placeholder="https://www.google.com/alerts/feeds/…/…" autocomplete="off" spellcheck="false">
+        <div class="hint">Ro-Bought checks it every 30 minutes. Saving asks for access to Google Alerts feeds only.</div>
+      </div>
+      <div class="inline-actions">
+        <button type="submit" class="primary" id="saveAlerts">Save notification settings</button>
+        <button type="button" id="checkFeed">Check feed now</button>
+      </div>
+      <p id="alertsMsg" class="small" role="status"></p>
+      <ul id="alertItems" class="alert-items small"></ul>
+    </form>
+
+    <section class="card" id="activityCard">
+      <h2>Activity</h2>
+      <ol id="log" class="log small"></ol>
+      <div class="inline-actions">
+        <button type="button" id="copyLog">Copy log</button>
+        <button type="button" id="clearLog">Clear log</button>
+      </div>
+      <p id="logMsg" class="small" role="status"></p>
+    </section>
   </main>
 
   <script src="../shared/namespace.js"></script>
@@ -135,6 +189,7 @@
   <script src="../shared/url-utils.js"></script>
   <script src="../shared/ticket-guard.js"></script>
   <script src="../shared/config.js"></script>
+  <script src="../shared/alerts.js"></script>
   <script src="options.js"></script>
 </body>
 </html>

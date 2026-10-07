@@ -673,3 +673,112 @@ test('teach: the "close a pop-up" button can be taught', async () => {
   assert.equal(res.ok, true);
   assert.deepEqual(res.selectors.dismissPopup, { selector: '#promo-close', label: 'No thanks' });
 });
+
+// ---------------------------------------------------------------------------
+// Phase 5: sound, Google Alerts feed, activity log
+// ---------------------------------------------------------------------------
+
+test('sound: played by one offscreen document; the off switch is respected; Test always plays', async () => {
+  await fake.chrome.storage.local.set({ [STORAGE_KEYS.ALERT_SETTINGS]: { sound: true } });
+  const sounds = () => fake.calls.runtimeMessages.filter((m) => m.type === MESSAGES.PLAY_SOUND);
+  const before = sounds().length;
+  // Two at once must not try to create two offscreen documents.
+  const [a, b] = await Promise.all([playSound('attention'), playSound('success')]);
+  assert.equal(a.ok, true);
+  assert.equal(b.ok, true);
+  assert.equal(fake.calls.offscreenCreated, 1);
+  assert.deepEqual(sounds().slice(before).map((m) => [m.kind, m.target]), [['attention', 'offscreen'], ['success', 'offscreen']]);
+
+  await fake.chrome.storage.local.set({ [STORAGE_KEYS.ALERT_SETTINGS]: { sound: false } });
+  assert.equal((await playSound('attention')).skipped, true);
+  assert.equal((await send(MESSAGES.TEST_SOUND, page, { kind: 'success' })).ok, true); // Test ignores the switch
+  assert.equal(sounds().at(-1).kind, 'success');
+  assert.equal((await playSound('bogus', { force: true })).kind, 'attention');
+});
+
+test('a pause plays the attention sound', async () => {
+  await fake.chrome.storage.local.set({ [STORAGE_KEYS.ALERT_SETTINGS]: { sound: true } });
+  await saveConfig();
+  await armFresh();
+  const before = fake.calls.runtimeMessages.length;
+  await send(MESSAGES.GUARD_STATUS, content(runTab()), { guard: captcha });
+  await settle();
+  assert.ok(fake.calls.runtimeMessages.slice(before).some((m) => m.type === MESSAGES.PLAY_SOUND && m.kind === 'attention'));
+  await send(MESSAGES.DISARM);
+});
+
+const FEED_URL = 'https://www.google.com/alerts/feeds/01234567890123456789/98765432109876543210';
+const feedXml = (ids) => `<feed>${ids.map((id) => `<entry><id>${id}</id><title type="html">News &lt;b&gt;${id}&lt;/b&gt;</title>` +
+  `<link href="https://www.google.com/url?rct=j&amp;url=https://news.example.com/${id}&amp;ct=ga"/><published>2026-10-07T12:00:00Z</published></entry>`).join('')}</feed>`;
+
+test('alerts: the first check connects quietly; later new results are announced once; clicks open the article', async () => {
+  let ids = ['a1', 'a2'];
+  let fetched = 0;
+  globalThis.fetch = async (url, opts) => {
+    fetched++;
+    assert.equal(url, FEED_URL);
+    assert.equal(opts.credentials, 'omit');
+    return { ok: true, status: 200, url, text: async () => feedXml(ids) };
+  };
+  await fake.chrome.storage.local.set({ [STORAGE_KEYS.ALERT_SETTINGS]: { sound: true, feedUrl: FEED_URL } });
+
+  // Without the feed permission: a clear error, no fetch.
+  let res = await send(MESSAGES.ALERTS_SAVED);
+  assert.equal(res.ok, false);
+  assert.match(res.error, /not granted/);
+  assert.equal(fetched, 0);
+  assert.ok(fake.alarms.has('robought-alerts'));
+
+  fake.granted.add('https://www.google.com/alerts/feeds/*');
+  res = await send(MESSAGES.ALERTS_CHECK);
+  assert.deepEqual(res, { ok: true, total: 2, fresh: 0 });
+  assert.equal(notified('alert-connected').length, 1);
+  const alertNotes = () => fake.calls.notifications.filter((n) => /^robought-alert-[0-9a-z]+-\d$/.test(n.id));
+  assert.equal(alertNotes().length, 0, 'existing results are not announced');
+
+  ids = ['a3', 'a1', 'a2'];
+  res = await send(MESSAGES.ALERTS_CHECK);
+  assert.deepEqual(res, { ok: true, total: 3, fresh: 1 });
+  const note = alertNotes().at(-1);
+  assert.equal(note.message, 'News a3');
+  res = await send(MESSAGES.ALERTS_CHECK);
+  assert.equal(res.fresh, 0, 'announced once');
+
+  const st = fake.store.get(STORAGE_KEYS.ALERT_STATE);
+  assert.deepEqual(st.items.map((i) => i.id), ['a3', 'a1', 'a2']);
+  assert.equal(st.items[0].url, 'https://news.example.com/a3');
+
+  const tabsBefore = fake.tabs.size;
+  await fake.chrome.notifications.onClicked.dispatch(note.id);
+  await settle();
+  assert.equal(fake.tabs.size, tabsBefore + 1);
+  assert.equal([...fake.tabs.values()].at(-1).url, 'https://news.example.com/a3');
+});
+
+test('alerts: many new results → 3 notifications and a summary; a broken feed records the error', async () => {
+  globalThis.fetch = async (url) => ({ ok: true, status: 200, url, text: async () => feedXml(['b1', 'b2', 'b3', 'b4', 'b5', 'a3', 'a1', 'a2']) });
+  const before = fake.calls.notifications.length;
+  const res = await send(MESSAGES.ALERTS_CHECK);
+  assert.equal(res.fresh, 5);
+  const ids = fake.calls.notifications.slice(before).map((n) => n.id);
+  assert.equal(ids.filter((id) => /^robought-alert-[0-9a-z]+-\d$/.test(id)).length, 3);
+  assert.ok(ids.includes('robought-alert-more'));
+
+  globalThis.fetch = async (url) => ({ ok: false, status: 500, url, text: async () => '' });
+  const bad = await send(MESSAGES.ALERTS_CHECK);
+  assert.match(bad.error, /HTTP 500/);
+  assert.match(fake.store.get(STORAGE_KEYS.ALERT_STATE).lastError, /HTTP 500/);
+});
+
+test('alerts: clearing the feed stops polling', async () => {
+  await fake.chrome.storage.local.set({ [STORAGE_KEYS.ALERT_SETTINGS]: { sound: true, feedUrl: null } });
+  assert.deepEqual(await send(MESSAGES.ALERTS_SAVED), { ok: true });
+  assert.ok(!fake.alarms.has('robought-alerts'));
+});
+
+test('activity log can be cleared from the options page only', async () => {
+  assert.ok(runState().events.length > 0);
+  assert.match((await send(MESSAGES.CLEAR_LOG, content(runTab()))).error, /not allowed/);
+  assert.deepEqual(await send(MESSAGES.CLEAR_LOG), { ok: true });
+  assert.deepEqual(runState().events, []);
+});

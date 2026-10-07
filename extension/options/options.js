@@ -167,7 +167,35 @@
       text += delta > 0 ? ` That's in ${humanDuration(delta)}.` : ' That time has already passed.';
     }
     $('dropTimeHint').textContent = text;
+    const future = !!t && t > Date.now();
+    $('addCalendar').disabled = !future;
+    $('downloadIcs').disabled = !future;
   }
+
+  // ---- calendar reminders ----
+
+  function reminderInput() {
+    const dropTime = fromLocalInput($('dropTime').value);
+    if (!dropTime) return null;
+    return { productName: $('productName').value.trim(), productUrl: $('productUrl').value.trim(), dropTime };
+  }
+
+  $('addCalendar').addEventListener('click', () => {
+    const input = reminderInput();
+    if (input) chrome.tabs.create({ url: RoBought.alerts.googleCalendarUrl(input) });
+  });
+
+  $('downloadIcs').addEventListener('click', () => {
+    const input = reminderInput();
+    if (!input) return;
+    const blob = new Blob([RoBought.alerts.icsFile(input)], { type: 'text/calendar' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = 'ro-bought-drop.ics';
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(url), 10_000);
+  });
 
   function clearMessages() {
     for (const el of form.querySelectorAll('.error')) el.remove();
@@ -211,7 +239,9 @@
   function setLocked(isLocked) {
     locked = isLocked;
     $('locked').hidden = !isLocked;
-    for (const el of form.elements) el.disabled = isLocked;
+    for (const el of form.elements) {
+      if (!el.hasAttribute('data-always')) el.disabled = isLocked; // calendar buttons stay usable
+    }
     renderButtons();
   }
 
@@ -219,7 +249,10 @@
 
   async function revokeOtherOrigins(keepPatterns) {
     const { origins = [] } = await chrome.permissions.getAll();
-    const stale = origins.filter((o) => !keepPatterns.includes(o));
+    const { [STORAGE_KEYS.ALERT_SETTINGS]: alertSettings } = await chrome.storage.local.get(STORAGE_KEYS.ALERT_SETTINGS);
+    // The Google Alerts feed permission belongs to the notifications settings, not the store.
+    const keep = alertSettings?.feedUrl ? [...keepPatterns, RoBought.alerts.FEED_PERMISSION] : keepPatterns;
+    const stale = origins.filter((o) => !keep.includes(o));
     if (stale.length) await chrome.permissions.remove({ origins: stale });
   }
 
@@ -286,6 +319,11 @@
 
   chrome.storage.onChanged.addListener((changes, area) => {
     if (area !== 'local') return;
+    if (changes[STORAGE_KEYS.ALERT_STATE]) {
+      alertState = changes[STORAGE_KEYS.ALERT_STATE].newValue || null;
+      renderAlertState();
+    }
+    if (changes[STORAGE_KEYS.RUN_STATE]) renderLog(changes[STORAGE_KEYS.RUN_STATE].newValue?.events);
     if (changes[STORAGE_KEYS.CONFIG]) {
       const next = changes[STORAGE_KEYS.CONFIG].newValue;
       setStored(next);
@@ -299,6 +337,166 @@
     }
   });
 
+  // ---- notifications: sound + Google Alerts (a separate form; usable during a run) ----
+
+  const alertsForm = $('alertsForm');
+  let alertState = null;
+  let queryEdited = false;
+
+  function suggestedQuery() {
+    return RoBought.alerts.suggestQuery($('productName').value);
+  }
+
+  function fillAlerts(settings) {
+    $('sound').checked = settings?.sound !== false;
+    $('alertQuery').value = settings?.query || suggestedQuery();
+    queryEdited = !!settings?.query;
+    $('feedUrl').value = settings?.feedUrl || '';
+  }
+
+  function renderAlertState() {
+    const st = alertState;
+    const msg = $('alertsMsg');
+    const list = $('alertItems');
+    if (!st || !st.feedUrl) {
+      list.replaceChildren();
+      $('checkFeed').hidden = !$('feedUrl').value.trim();
+      return;
+    }
+    $('checkFeed').hidden = false;
+    const when = st.lastCheckAt ? new Date(st.lastCheckAt).toLocaleString() : 'not yet';
+    if (!msg.dataset.sticky) {
+      msg.textContent = st.lastError ? `Last check (${when}) failed: ${st.lastError}` : `Feed last checked ${when}.`;
+    }
+    const items = (st.items || []).map((item) => {
+      const li = document.createElement('li');
+      const url = RoBought.alerts.articleUrl(item.url || '');
+      if (url) {
+        const a = document.createElement('a');
+        a.href = url;
+        a.target = '_blank';
+        a.rel = 'noopener noreferrer';
+        a.textContent = item.title;
+        li.append(a);
+      } else {
+        li.textContent = item.title;
+      }
+      if (item.published) li.append(` — ${new Date(item.published).toLocaleString()}`);
+      return li;
+    });
+    list.replaceChildren(...items);
+  }
+
+  function alertsNote(text) {
+    const msg = $('alertsMsg');
+    msg.textContent = text;
+    msg.dataset.sticky = '1';
+    setTimeout(() => {
+      delete msg.dataset.sticky;
+      renderAlertState();
+    }, 8000);
+  }
+
+  $('alertQuery').addEventListener('input', () => {
+    queryEdited = true;
+  });
+  $('productName').addEventListener('input', () => {
+    if (!queryEdited) $('alertQuery').value = suggestedQuery();
+  });
+
+  $('openAlerts').addEventListener('click', async () => {
+    const query = $('alertQuery').value.trim() || suggestedQuery();
+    if (!query) {
+      alertsNote('Enter a product name (or a search) first.');
+      return;
+    }
+    try {
+      await navigator.clipboard.writeText(query);
+    } catch {
+      // clipboard unavailable: the URL still carries the query
+    }
+    chrome.tabs.create({ url: RoBought.alerts.alertsPageUrl(query) });
+  });
+
+  $('testSound').addEventListener('click', async () => {
+    const res = await chrome.runtime.sendMessage({ type: MESSAGES.TEST_SOUND });
+    alertsNote(res?.ok ? 'Played the alert sound.' : `Couldn't play the sound: ${res?.error || 'unknown error'}.`);
+  });
+
+  $('checkFeed').addEventListener('click', async () => {
+    const res = await chrome.runtime.sendMessage({ type: MESSAGES.ALERTS_CHECK });
+    alertsNote(res?.ok ? `Feed checked: ${res.total} result${res.total === 1 ? '' : 's'}, ${res.fresh} new.` : `Couldn't read the feed: ${res?.error || 'unknown error'}.`);
+  });
+
+  alertsForm.addEventListener('submit', (ev) => {
+    ev.preventDefault();
+    const feedRaw = $('feedUrl').value.trim();
+    const feedUrl = feedRaw ? RoBought.alerts.parseFeedUrl(feedRaw) : null;
+    if (feedRaw && !feedUrl) {
+      alertsNote('That isn\'t a Google Alerts RSS link. It should start with https://www.google.com/alerts/feeds/');
+      return;
+    }
+    const settings = {
+      sound: $('sound').checked,
+      query: queryEdited ? $('alertQuery').value.trim().slice(0, 300) : '',
+      feedUrl,
+    };
+    // permissions.request must be the first async call inside the click.
+    const permission = feedUrl
+      ? chrome.permissions.request({ origins: [RoBought.alerts.FEED_PERMISSION] })
+      : Promise.resolve(true);
+    permission
+      .then(async (granted) => {
+        if (!granted) {
+          alertsNote('Access to Google Alerts feeds was not granted, so the feed was not saved.');
+          return;
+        }
+        if (!feedUrl) await chrome.permissions.remove({ origins: [RoBought.alerts.FEED_PERMISSION] }).catch(() => {});
+        await chrome.storage.local.set({ [STORAGE_KEYS.ALERT_SETTINGS]: settings });
+        const res = await chrome.runtime.sendMessage({ type: MESSAGES.ALERTS_SAVED });
+        if (!feedUrl) alertsNote('Saved.');
+        else if (res?.ok) alertsNote(`Saved. Feed connected: ${res.total} result${res.total === 1 ? '' : 's'} so far.`);
+        else alertsNote(`Saved, but the feed couldn't be read yet: ${res?.error || 'unknown error'}.`);
+      })
+      .catch((e) => alertsNote(`Could not save: ${e.message}`));
+  });
+
+  // ---- activity log ----
+
+  let lastEvents = [];
+
+  function renderLog(events) {
+    lastEvents = Array.isArray(events) ? events : [];
+    const items = [...lastEvents].reverse().map((ev) => {
+      const li = document.createElement('li');
+      li.dataset.level = ev.level;
+      li.textContent = `${new Date(ev.t).toLocaleString()} — ${ev.text}`;
+      return li;
+    });
+    if (!items.length) {
+      const li = document.createElement('li');
+      li.className = 'muted';
+      li.textContent = 'Nothing yet.';
+      items.push(li);
+    }
+    $('log').replaceChildren(...items);
+  }
+
+  $('copyLog').addEventListener('click', async () => {
+    const text = lastEvents.map((ev) => `${new Date(ev.t).toISOString()} [${ev.level}] ${ev.text}`).join('\n');
+    try {
+      await navigator.clipboard.writeText(text || '(empty)');
+      $('logMsg').textContent = 'Copied.';
+    } catch {
+      $('logMsg').textContent = "Couldn't copy to the clipboard.";
+    }
+  });
+
+  $('clearLog').addEventListener('click', async () => {
+    const res = await chrome.runtime.sendMessage({ type: MESSAGES.CLEAR_LOG });
+    $('logMsg').textContent = res?.ok ? 'Cleared.' : 'Could not clear the log.';
+  });
+
   // ---- init ----
 
   async function init() {
@@ -310,13 +508,19 @@
       `Polite limits: restock checks every ${LIMITS.RESTOCK_INTERVAL_MIN} s or slower, retries after a drop every ` +
       `${LIMITS.BURST_INTERVAL_MIN} s or slower, and automatic back-off when the retailer says "slow down" (HTTP 429/503).`;
 
-    const stored = await chrome.storage.local.get([STORAGE_KEYS.CONFIG, STORAGE_KEYS.RUN_STATE]);
+    const stored = await chrome.storage.local.get([
+      STORAGE_KEYS.CONFIG, STORAGE_KEYS.RUN_STATE, STORAGE_KEYS.ALERT_SETTINGS, STORAGE_KEYS.ALERT_STATE,
+    ]);
     const raw = stored[STORAGE_KEYS.CONFIG];
     // Show what was stored even if it no longer validates, so the user can fix it.
     setStored(raw);
     fillForm(raw ? { ...RoBought.config.defaults(), ...RoBought.config.validate(raw).config, ...pickDisplayable(raw) } : RoBought.config.defaults());
     const state = stored[STORAGE_KEYS.RUN_STATE];
     setLocked(!!state && ACTIVE_STATUSES.includes(state.status));
+    fillAlerts(stored[STORAGE_KEYS.ALERT_SETTINGS]);
+    alertState = stored[STORAGE_KEYS.ALERT_STATE] || null;
+    renderAlertState();
+    renderLog(state?.events);
   }
 
   function pickDisplayable(raw) {
