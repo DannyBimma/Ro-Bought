@@ -846,8 +846,52 @@ try {
     store.set({ promo: 'stubborn' });
     t0 = await armAndRestock({ ...AUTO, selectors: { dismissPopup: { selector: '#promo-ok', label: 'Show me the deal' } } });
     const s = await waitState((x) => x.status === 'completed', 'order placed with the taught close button', 25000);
-    assert.ok(s.events.some((e) => /Closed a pop-up \("Show me the deal"\)/.test(e.text)));
+    assert.ok(s.events.some((e) => /Clicked "Show me the deal" first \(taught\)/.test(e.text)));
     assert.equal(store.snapshot().orders, 1);
+    assert.deepEqual(await sw('return await reset();'), { ok: true });
+  });
+
+  await step('Prime-deal buying options (radio): pauses untaught; teaching "Regular price" by its text makes it automatic', async () => {
+    // Untaught: the Prime price is selected, so Add to cart is hidden. Pause, never "Join Prime".
+    store.reset();
+    store.set({ promo: 'radio' });
+    let t0 = await armAndRestock(AUTO);
+    const paused = await waitState((x) => x.status === 'paused', 'pause', 25000);
+    assert.equal(paused.pause.kind, 'checkout');
+    assert.match(paused.pause.label, /regular-price buying option/);
+    assert.equal(placeRequests(t0), 0);
+    await disarmRun();
+
+    // Teach it the way a user would: Pick, then click the option's text on the page.
+    store.reset();
+    store.set({ stock: 'in', promo: 'radio' });
+    await go('/store/product.html');
+    await waitUntil(() => pageHas('#opt-regular-label'), { what: 'buying options' });
+    assert.deepEqual(await sw('return await teachOpen();'), { ok: true });
+    await waitUntil(async () => {
+      const r = await panel();
+      if (r?.sessionId) await cdp.send('Target.detachFromTarget', { sessionId: r.sessionId }).catch(() => {});
+      return r?.buttons?.some((b) => b.action === 'pick:dismissPopup') ? r : null;
+    }, { what: 'teach panel' });
+    await clickPanelButton('pick:dismissPopup');
+    await sleep(200);
+    await clickInPage('#opt-regular-label');
+    const taught = await waitUntil(async () => {
+      const cfg = await sw("return (await chrome.storage.local.get('config')).config;");
+      return cfg.selectors?.dismissPopup ? cfg.selectors : null;
+    }, { what: 'taught option' });
+    assert.equal(taught.dismissPopup.selector, '#opt-regular-label', JSON.stringify(taught.dismissPopup));
+    assert.match(taught.dismissPopup.label, /^Regular price/);
+    await clickPanelButton('done');
+
+    // Next run: Ro-Bought selects "Regular price" by itself and buys.
+    store.reset();
+    store.set({ promo: 'radio' });
+    t0 = await armAndRestock({ ...AUTO, selectors: taught });
+    const s = await waitState((x) => x.status === 'completed', 'order placed', 25000);
+    assert.ok(s.events.some((e) => /Clicked "Regular price .*" first \(taught\)/.test(e.text)));
+    assert.equal(store.snapshot().orders, 1);
+    assert.equal(placeRequests(t0), 1);
     assert.deepEqual(await sw('return await reset();'), { ok: true });
   });
 

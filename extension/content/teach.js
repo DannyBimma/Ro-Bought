@@ -17,7 +17,7 @@
     const presetId = RoBought.url.presetFor(session.config.productUrl);
     const adapter = RoBought.adapters.forUrl(session.config.productUrl);
     if (READ_FIELDS.has(field.id)) return 'built-in detection';
-    if (field.id === 'dismissPopup') return 'not taught (Ro-Bought tries close / "No thanks" buttons)';
+    if (field.id === 'dismissPopup') return 'not taught (Ro-Bought tries obvious pop-up close / "No thanks" buttons)';
     const presets = adapter.selectors[field.id] || [];
     return presets.length ? `built-in (${RoBought.url.PRESET_NAMES[presetId]})` : 'matched by button text';
   }

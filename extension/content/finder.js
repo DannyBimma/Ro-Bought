@@ -121,7 +121,9 @@
     if (!(el instanceof Element)) return el;
     const wrap = el.closest('.a-button'); // Amazon: the real input sits beside the label
     const inner = wrap && wrap.querySelector('input.a-button-input, input[type="submit"], button');
-    return inner || el.closest(CLICKABLE) || el;
+    // A buying option: its <label> selects it when clicked, and stays visible even when the
+    // radio itself is styled away.
+    return inner || el.closest(CLICKABLE) || el.closest('label') || el;
   }
 
   /**

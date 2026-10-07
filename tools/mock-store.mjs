@@ -13,7 +13,7 @@
 // Control
 //   /__control?stock=in|out&price=…&tax=…&dropIn=<s>&dropAt=<epoch ms>&skewMs=…&fail=429:2:5
 //              &extraItem=1&reviewCaptcha=1&bankCheck=1&placeFails=1&addFails=1&placeLabel=…
-//              &promo=simple|stubborn|off&reset=1
+//              &promo=simple|stubborn|radio|off&reset=1
 //   /__control/log             recent requests (for checking polite intervals)
 
 const LOG_MAX = 2000;
@@ -25,7 +25,7 @@ export function createMockStore() {
   const initial = () => ({
     stock: 'out', price: 499.99, tax: 30, dropAt: 0, skewMs: 0,
     reviewCaptcha: false, bankCheck: false, placeFails: false, addFails: false,
-    promo: '', // '' | 'simple' (has "No thanks") | 'stubborn' (only "Show me the deal")
+    promo: '', // '' | 'simple' (has "No thanks") | 'stubborn' (only "Show me the deal") | 'radio' (Prime-deal buying options)
     placeLabel: 'Place your order', // the final button's text (change it to test taught buttons)
   });
   let state = initial();
@@ -43,7 +43,7 @@ export function createMockStore() {
     for (const key of ['price', 'tax', 'dropAt', 'skewMs']) {
       if (patch[key] !== undefined && Number.isFinite(Number(patch[key]))) state[key] = Number(patch[key]);
     }
-    if (patch.promo !== undefined) state.promo = ['simple', 'stubborn'].includes(patch.promo) ? patch.promo : '';
+    if (patch.promo !== undefined) state.promo = ['simple', 'stubborn', 'radio'].includes(patch.promo) ? patch.promo : '';
     for (const key of ['reviewCaptcha', 'bankCheck', 'placeFails', 'addFails']) {
       if (patch[key] !== undefined) state[key] = patch[key] === true || patch[key] === '1' || patch[key] === 'true';
     }
@@ -121,9 +121,28 @@ ${promoDialog()}
     return `<iframe title="Advertisement" name="${name}" src="about:blank" width="300" height="250"></iframe>`;
   }
 
-  /** A deal pop-up that hides Add to cart until it's dismissed. */
+  /**
+   * Hides Add to cart until the user acts: a deal pop-up, or (like Amazon during a Prime deal)
+   * buying options with the Prime price selected, which shows "Join Prime" instead.
+   */
   function promoDialog() {
     if (!state.promo) return '';
+    if (state.promo === 'radio') {
+      return `<fieldset id="buy-options"><legend>Choose a price</legend>
+  <label id="opt-prime-label"><input type="radio" name="offer" value="prime" checked> Prime member price $${(state.price - 50).toFixed(2)} (Join Prime)</label>
+  <label id="opt-regular-label"><input type="radio" name="offer" value="regular"> Regular price $${state.price.toFixed(2)}</label>
+</fieldset>
+<p id="join-prime-box"><button id="join-prime" type="button">Join Prime</button></p>
+<script>
+  for (const r of document.querySelectorAll('#buy-options input')) {
+    r.addEventListener('change', () => {
+      const regular = document.querySelector('#buy-options input[value="regular"]').checked;
+      document.getElementById('atc-form').style.display = regular ? '' : 'none';
+      document.getElementById('join-prime-box').style.display = regular ? 'none' : '';
+    });
+  }
+</script>`;
+    }
     const button = state.promo === 'simple'
       ? '<button id="promo-close" type="button">No thanks</button>'
       : '<button id="promo-ok" type="button">Show me the deal</button>';

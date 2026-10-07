@@ -137,12 +137,24 @@
   const CLOSE_TEXT = /^(?:no,? thanks|not now|maybe later|close|dismiss|got it|continue shopping|×|✕)$/i;
   const HIDDEN = 'hidden';
 
-  /** Clicks a taught "close the pop-up" button if one is showing. */
+  /** The radio/checkbox a taught element stands for (itself, or the one its label controls). */
+  function choiceOf(el) {
+    if (el.matches('input[type="radio"], input[type="checkbox"]')) return el;
+    return el.control || el.querySelector('input[type="radio"], input[type="checkbox"]') || null;
+  }
+
+  /**
+   * Clicks the taught "click first" element if it's showing: a pop-up's close button, or a buying
+   * option such as Amazon's "regular price" radio. An option that's already selected is left alone
+   * (clicking a checkbox twice would undo it).
+   */
   async function dismissTaught(ctl, s) {
     const found = F.find(document, s.dismissPopup);
     if (!found) return false;
+    const choice = choiceOf(found.el);
+    if (choice && choice.checked) return false;
     found.el.click();
-    await progress(ctl, 'product', { note: `Closed a pop-up ("${F.labelOf(found.el) || 'taught button'}").`, entered: false });
+    await progress(ctl, 'product', { note: `Clicked "${F.labelOf(found.el) || 'the taught button'}" first (taught).`, entered: false });
     return true;
   }
 
@@ -172,7 +184,8 @@
     const signal = ctl.ac.signal;
     await dismissTaught(ctl, s);
 
-    // Visible → go. Present but hidden → a pop-up or a collapsed panel. Absent → sold out.
+    // Visible → go. Present but hidden → a pop-up, or a buying option (e.g. a Prime deal) hides
+    // it. Absent → sold out.
     const probe = () => F.find(document, s.addToCart) || (F.findPresent(document, s.addToCart) ? HIDDEN : null);
     let found = await F.waitFor(probe, CHECKOUT.FIND_TIMEOUT_MS, signal);
     if (found === HIDDEN) found = (await F.waitFind(document, s.addToCart, 1500, signal)) || HIDDEN; // still rendering?
@@ -180,7 +193,7 @@
       found = (await F.waitFind(document, s.addToCart, 3000, signal)) || HIDDEN;
     }
     if (found === HIDDEN) {
-      return handoff(ctl, 'pause', 'Add to cart is on the page but hidden (a pop-up or a deal panel may be covering it). Make it visible, then click Resume. Tip: teach the pop-up\'s close button and Ro-Bought will close it next time', 'product');
+      return handoff(ctl, 'pause', 'Add to cart is on the page but hidden. Pick the regular-price buying option, or close the pop-up covering it, then click Resume. Tip: teach that option or button ("Click first, before Add to cart") and Ro-Bought will do it next time', 'product');
     }
     if (!found) {
       // Sold out again (or not quite live yet): go back to watching rather than give up.

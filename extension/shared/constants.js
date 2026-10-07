@@ -152,7 +152,9 @@
 
     // Buttons the user can teach (Options → Buttons, or ⚡ → Teach buttons on the store page).
     TEACH_FIELDS: [
-      { id: 'dismissPopup', label: 'Close a pop-up hiding Add to cart (optional)', where: 'product page' },
+      // A click that reveals Add to cart: a pop-up's close button, or a buying option such as
+      // Amazon's "regular price" radio during a Prime deal. (Id kept for saved configs.)
+      { id: 'dismissPopup', label: 'Click first, before Add to cart (optional)', where: 'product page: a pop-up\'s close button or the regular-price option' },
       { id: 'addToCart', label: 'Add to cart', where: 'product page' },
       { id: 'proceedToCheckout', label: 'Proceed to checkout', where: 'cart page' },
       { id: 'checkoutContinue', label: 'Continue / Use this address / Use this payment', where: 'checkout pages (up to 3)', multi: true },

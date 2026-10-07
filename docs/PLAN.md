@@ -245,7 +245,11 @@ Found on Amazon.com and the Nintendo US store with "Stop one click short" ticked
   would have looped back to watching.
   - The engine now tells "hidden" from "absent". It closes a pop-up via a taught button or an
     obvious close / "No thanks" / "Not now", and otherwise pauses with a clear message.
-  - New teachable button: "Close a pop-up hiding Add to cart".
+  - New teachable step, "Click first, before Add to cart". It covers a pop-up's close button
+    or a buying option. The re-test showed the real cause was a radio, not a pop-up: during a
+    Prime deal the Prime price is pre-selected and "Regular price" reveals Add to cart. Teach mode
+    resolves a click on an option's text to its `<label>`, and the engine leaves an
+    already-selected option alone. Mock store `promo=radio` plus an e2e step cover it.
 - **"Order now" taught as Proceed to checkout and Place order.**
   - "Order now", "Buy it now" and Amazon's `buy-now` ids are now never-click. "Pre-order now" is
     still allowed.

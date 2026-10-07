@@ -57,9 +57,16 @@ When the product can be bought, Ro-Bought clicks through the store's normal chec
 - **Your cart must be empty.** When you arm, Ro-Bought reads your cart once in the background and
   warns you straight away if anything is in it. On Amazon, "Save for later" moves items out of the
   cart without deleting them. During checkout it pauses if the cart holds anything else.
-- **A pop-up hiding Add to cart** (for example a Prime deal promotion) is closed if it has an obvious
-  close / "No thanks" / "Not now" button. Otherwise Ro-Bought pauses so you can dismiss it. Teach
-  the pop-up's button ("Close a pop-up hiding Add to cart") and it's closed automatically next time.
+- **When Add to cart is hidden**, Ro-Bought pauses so you can reveal it, then you click Resume.
+  Two common causes:
+  - A Prime deal selects the Prime price, so Amazon shows "Join Prime" instead of Add to cart.
+  - A pop-up covers the button. If the pop-up has an obvious close / "No thanks" / "Not now"
+    button, Ro-Bought closes it itself.
+
+  To skip the pause on drop day, teach **"Click first, before Add to cart"**: pick the
+  **Regular price** option (click its text) or the pop-up's close button. Ro-Bought then clicks it
+  before Add to cart, and leaves an option alone if it's already selected. "Join Prime" can't be
+  taught.
 - If the item sells out again between "in stock" and "add to cart", it goes back to watching.
 
 ### Store presets and "Teach buttons"
@@ -146,6 +153,8 @@ APIs (`tests/fake-chrome.js`). Node 22+ is required.
    - `addFails=1`: sold out at add-to-cart.
    - `placeLabel=Finish`: the final button has wording only a taught button matches.
    - `promo=simple` / `promo=stubborn`: a deal pop-up hides Add to cart (with or without a "No thanks").
+   - `promo=radio`: Prime-deal buying options, with the Prime price selected (shows "Join Prime");
+     picking "Regular price" reveals Add to cart.
    - `bankCheck=1`: a 3-D Secure frame on the final review.
    - `reset=1`: start over.
 6. `http://localhost:8080/__control` shows the store state, including the cart and how many orders were
