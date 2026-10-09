@@ -1,18 +1,21 @@
-# 🤖 Ro-Bought
+ # 🤖 Ro-Bought
 
-**A fair shot at the products scalpers grab first.**
+**A purchase bot that gives innocent consumers a chance to beat rotten, dirty scalpers at their own game.**
 
-Ro-Bought is a free add-on for Google Chrome. It watches **one product** on **one online store**
-for you. The moment that product can be bought, it goes through the store's normal checkout in
-**your own account**, faster than anyone could click. It buys **one unit, once**, and then stops.
+A free and open source add-on/extension for Google Chrome. It watches **one product** on **one online store** at
+a time for the user. The instant a targeted product can be bought, it goes through the store's checkout procedure using
+a **logged-in account** faster than any human, and matching the speed of the fastest horse in a scalper’s stable. It buys
+**one unit of one item, once**, and then stops. This tool is strictly designed to beat soulless resellers, without giving users
+the power to become the very thing they swore to destroy.  
 
-It's built for real customers who keep losing sneakers, consoles and collectibles to resellers'
-bots. It is **not** a scalping tool: it refuses to buy event tickets, never gets around CAPTCHAs or
+It was inspired by the scalp rats who have bought the Nintendo Switch 2 Zelda special edition out to oblivion. And for 
+everyday consumers who keep losing sneakers, consoles and collectibles to grimy resellers' bots. It is **not** a scalping
+tool and it adheres to online consumer laws and etiquette: it refuses to buy event tickets, never goes around CAPTCHAs or
 queues, and only ever buys one item for one person.
 
-By default it **stops one click short**. It fills the cart and walks through checkout, then
-highlights the final **Place order** button and lets *you* click it. Fully automatic purchasing is
-there if you want it, with strict safety checks.
+By default it will stop **one click short** of clicking purchase (this can be configured in the options). After it fills the cart and
+walks through the checkout process, highlights the final **”Place Order”** button, and alerts the user to click it. Fully automatic
+purchasing is there if the user so desires, with strict safety checks and guardrails on spending.
 
 ---
 
@@ -21,18 +24,18 @@ there if you want it, with strict safety checks.
 1. [What you need](#what-you-need)
 2. [Install Ro-Bought (Windows, Mac, Linux)](#install-ro-bought)
 3. [Your first run, step by step](#your-first-run-step-by-step)
-4. [The settings explained](#the-settings-explained)
-5. [On drop day: checklist](#on-drop-day-checklist)
+4. [Settings explained](#the-settings-explained)
+5. [Drop day: checklist](#on-drop-day-checklist)
 6. [Reading the 🤖 icon and the status panel](#reading-the--icon-and-the-status-panel)
-7. [When Ro-Bought pauses (and what to do)](#when-ro-bought-pauses)
+7. [Ro-Bought pauses (and what to do)](#when-ro-bought-pauses)
 8. [Teach buttons: making it work on any store](#teach-buttons)
 9. [Notifications: sound, Google Alerts and calendar reminders](#notifications)
 10. [Store tips: Amazon, Nintendo and others](#store-tips)
-11. [What Ro-Bought will never do](#what-ro-bought-will-never-do)
+11. [Ro-Bought rules](#what-ro-bought-will-never-do)
 12. [Privacy](#privacy)
 13. [Troubleshooting](#troubleshooting)
 14. [Updating or removing Ro-Bought](#updating-or-removing-ro-bought)
-15. [For developers](#for-developers)
+15. [For devs](#for-developers)
 
 ---
 
@@ -40,23 +43,23 @@ there if you want it, with strict safety checks.
 
 - A **computer** running Windows, macOS or Linux. Phones and tablets can't run Chrome add-ons.
 - **Google Chrome**, free from [google.com/chrome](https://www.google.com/chrome/). Other browsers
-  built on Chrome (Microsoft Edge, Brave) may work but haven't been tested.
-- An **account at the store** you're buying from, with your **delivery address and payment card
-  saved** in that account. Ro-Bought never types card numbers or passwords, so they must already be
-  saved with the store.
-- A few minutes to set it up, and ideally a **practice run** before the real drop.
+  built on Chrome (Microsoft Edge, Brave) may work but I have not and do not care to use or test them.
+- An **account at the store** you're buying from, with your **delivery address and payment card saved** 
+  in that account. Ro-Bought **NEVER** inputs or saves card numbers or passwords, so they must already be
+  saved within an account on the store itself.
+- A few minutes to set things up, and ideally a **practice run** before the real drop.
 
 ## Install Ro-Bought
 
-Ro-Bought isn't on the Chrome Web Store. You load it into Chrome yourself, which takes about two
-minutes. Chrome calls this "loading an unpacked extension", and it's completely normal for add-ons
-you get from GitHub.
+Ro-Bought isn't on the Chrome Web Store. So you have to load it into Chrome yourself, which should take about
+two minutes for a complete noob (no offence to noobs). Chrome calls this process ”loading an unpacked extension",
+and it's completely normal for cool add-ons like this that people get from GitHub.
 
 ### 1. Download it
 
-1. On Ro-Bought's GitHub page, click the green **Code** button, then **Download ZIP**.
-2. Find the downloaded file (usually in your **Downloads** folder). It's called something like
-   `Ro-Bought-main.zip`.
+1. On this GitHub page, click the green **Code** button, then **Download ZIP**.
+2. Find the downloaded file (usually in your **Downloads** folder). It's should called:
+   `Ro-Bought-main.zip`. Or something of the like.
 
 ### 2. Unzip it
 
@@ -64,13 +67,14 @@ you get from GitHub.
 | --- | --- | --- |
 | Right-click the ZIP → **Extract All…** → **Extract**. | Double-click the ZIP. A folder appears next to it. | Right-click the ZIP → **Extract Here** (or run `unzip Ro-Bought-main.zip` in a terminal). |
 
-You now have a folder called **Ro-Bought-main**.
+You should now have a folder called **Ro-Bought-main**.
 
-> **Important:** move this folder somewhere permanent, such as your **Documents** folder, before
-> the next step. Chrome runs Ro-Bought straight from this folder. If you delete or move it later,
+> **Important:** DO NOT leave this folder in downloads. Move somewhere it can live
+> permanently on your machine, such as your **Documents** folder, before the next step.
+> Chrome runs Ro-Bought straight from this folder. If you delete or move it later,
 > Ro-Bought stops working, and you'd need to load it again (and redo your settings).
 
-Inside **Ro-Bought-main** there's a folder called **extension**. That's the one you'll give Chrome.
+Inside **Ro-Bought-main** there's a folder called **extension**. That's the one you'll load into Chrome.
 On Windows, the unzipped folder sometimes contains *another* `Ro-Bought-main` folder; just open it
 until you see the **extension** folder.
 
@@ -81,22 +85,22 @@ until you see the **extension** folder.
 2. In the top-right corner, turn on **Developer mode**.
 3. Click **Load unpacked** (top-left).
 4. In the window that opens, find the **Ro-Bought-main** folder, click once on the **extension**
-   folder inside it, and click **Select** (Windows/Linux) or **Open** (Mac).
+   folder inside of it, and click **Select** (Windows/Linux) or **Open** (Mac).
 5. Ro-Bought appears in your extensions list, and its settings page opens in a new tab.
 
-### 4. Pin the 🤖 button to your toolbar
+### 4. Pin the 🤖 button to your toolbar (the latest version of Chrome may pin it automatically)
 
 Click the **puzzle-piece** icon at the top-right of Chrome, then click the **pin** next to
 **Ro-Bought**. The 🤖 button now stays visible in your toolbar.
 
 > Chrome may sometimes warn you about extensions in developer mode when it starts. That's expected
-> for add-ons loaded this way. Keep Ro-Bought turned on.
+> for add-ons loaded in this manner. Keep Ro-Bought turned on… 🫦
 
 ## Your first run, step by step
 
-**Tip:** do a practice run first. Pick any cheap item that's in stock and leave **Stop one click
-short** ticked. Ro-Bought will add it to your cart and stop at **Place order** without buying
-anything. Afterwards, remove the item from your cart.
+**Tip:** do a practice run first. Pick any cheap item that's in stock and sleclt **Stop one click
+short** in the options menu. Ro-Bought should add it to your cart and stop at **Place order**
+without buying anything. Afterwards, remove the item from your cart.
 
 ### 1. Tell Ro-Bought what to buy
 
@@ -107,13 +111,13 @@ Open the settings page: click the 🤖 button → **Options**.
 2. Paste it into **Product page URL**.
 3. Optionally, type the **Product name**. This is used for notifications and Google Alerts.
 4. Under **Store preset** you'll see which store Ro-Bought recognised: Amazon.com, the Nintendo US
-   store, or "Generic store" for everything else.
+   store, or "Generic store" for everything else (I didn’t have time to ID every online store in the world).
 
 ### 2. Choose when it should buy
 
-- **Scheduled drop:** you know the release date and time. Enter it in **Drop date and time**, in
+- **Scheduled drop:** if you know the release date and time. Enter it in **Drop date and time**, in
   your own time zone.
-- **Restock watch:** you don't know when it'll be back. Ro-Bought checks the page regularly.
+- **Restock watch:** if you don't know when it'll be restocked. Ro-Bought checks the page regularly.
 
 ### 3. Choose how far it goes
 
@@ -130,7 +134,8 @@ website; click **Allow**. Ro-Bought only ever gets access to that one store.
 ### 5. Arm it
 
 Click the 🤖 button → **Arm**. A tab with the product opens, the 🤖 button shows **ON**, and a small
-**Ro-Bought panel** appears in the bottom-right corner of the store page. You're set.
+**Ro-Bought panel** appears in the bottom-right corner of the store page. Once all of those things happen
+you're all set and ready to fight the scalpers.
 
 ### 6. What happens next
 
@@ -141,7 +146,7 @@ Click the 🤖 button → **Arm**. A tab with the product opens, the 🤖 button
 - **When it can be bought:** you hear a sound and the 🤖 button shows **GO**. Ro-Bought adds the item
   to your cart, checks the cart, and goes through checkout.
 - **Stop one click short:** you hear a sound, the **Place order** button is highlighted, and the
-  panel says **Ready — your click**. Check the order and click Place order yourself.
+  panel says **Ready — your click**. Check the order and click “Place Order/Buy Now” yourself.
 - **When the order goes through,** the 🤖 button shows **✓** and you get an "Order placed!"
   notification.
 
@@ -163,7 +168,7 @@ defaults unless you have a reason to change them.
 | **Fire offset (ms)** | Fine-tuning for the exact moment Ro-Bought fires. Leave it at **0**. |
 | **Retry interval / window after the drop** | If the product isn't live yet at the drop time, how often to retry (default every 3 s) and for how long (default 180 s). |
 | **Restock check interval** | How often to check for stock (default 45 s, never faster than 20 s, to be polite to the store). |
-| **Jitter (±%)** | Varies the timing slightly so checks don't look robotic. Default 20 %. |
+| **Jitter (±%)** | Varies the timing slightly so checks don't look robotic even though they are. Default 20 %. |
 | **Stop one click short** | Ro-Bought stops at the final **Place order** button and you click it. Recommended. |
 | **Max order total** | The most you'll pay, including tax and shipping. Required for automatic purchase; a good safety net either way. |
 | **Buttons** | The buttons you've taught (see [Teach buttons](#teach-buttons)), with **Clear** to remove one. |
@@ -174,20 +179,20 @@ While a run is active, the product and purchase settings are locked. Disarm firs
 
 ## On drop day: checklist
 
-- ✅ **Plugged in and awake.** Ro-Bought keeps your screen awake while it's armed, but it can't stop
+- **Plugged in and awake.** Ro-Bought keeps your screen awake while it's armed, but it can't stop
   your computer sleeping if you close a laptop lid or put it to sleep yourself.
   - **Mac:** keep the lid open.
   - **Windows:** Settings → System → Power, and set sleep to "Never" for the day.
   - **Linux:** check your power settings.
-- ✅ **Chrome open, with the store tab in front.** Chrome slows down tabs that are hidden or minimised,
+- **Chrome open, with the store tab in front.** Chrome slows down tabs that are hidden or minimised,
   which can make Ro-Bought late. It warns you if the tab goes into the background.
-- ✅ **Signed in** to the store, with your **address and payment card saved** in your account.
-- ✅ **Empty cart.** Ro-Bought buys only your one product, and pauses if anything else is in the cart.
+- **Signed in** to the store, with your **address and payment card saved** in your account.
+- **Empty cart.** Ro-Bought buys only your one product, and pauses if anything else is in the cart.
   It checks this when you arm and warns you straight away. On Amazon, **Save for later** moves items
   out of the cart without deleting them.
-- ✅ **Sound on** (Notifications → **Test sound**), so you hear when it needs you.
-- ✅ **Practised once** with "Stop one click short" ticked, and taught any buttons it needed.
-- ✅ **Stay nearby.** If a CAPTCHA or queue appears, only you can deal with it.
+- **Sound on** (Notifications → **Test sound**), so you hear when it needs you.
+- **Practised once** with "Stop one click short" ticked, and taught any buttons it needed.
+- **Stay nearby.** If a CAPTCHA or queue appears, only you can deal with it.
 
 ## Reading the 🤖 icon and the status panel
 
@@ -238,9 +243,9 @@ popup tell you what to do. Deal with it, then click **Resume**.
 ## Teach buttons
 
 Every store's checkout looks a little different. Ro-Bought already knows Amazon.com and the Nintendo
-US store, and it can find common buttons ("Add to cart", "Proceed to checkout", "Place your order")
-on most other stores by their wording. If it ever can't find a button, **show it once** and it will
-remember.
+US store for the most part, and it can find common buttons ("Add to cart", "Proceed to checkout",
+"Place your order") on most other stores by their wording from reading the HTML. If it ever can't find a
+button, **teach it once** and it will remember.
 
 1. Make sure Ro-Bought isn't armed. Open the store in a tab.
 2. Click the 🤖 button → **Teach buttons**. A teach panel appears on the page.
@@ -271,20 +276,21 @@ Tips:
 - Taught buttons are listed in **Options → Buttons**, where **Clear** removes them. If you change to
   a different store, they're cleared automatically.
 - Stuck? In the teach panel, **Copy page report** copies a list of the buttons Ro-Bought can see on
-  that page (no personal details). Share it with whoever helps you, for example in a GitHub issue.
+  that page (no personal details). Share any issues with me in a GitHub issue.
 
 ## Notifications
 
-All on the settings page under **Notifications**. You can change these even while Ro-Bought is armed.
+They all live on the settings page under **Notifications**. You can change these even while Ro-Bought is armed.
 
 ### Sound
 
-Ro-Bought plays a short sound when it finds stock, when it needs you (a pause or the final click),
-and a happy chime when an order is placed. Click **Test sound** to hear it. Untick the box for silence.
+Ro-Bought plays a short system sound when it finds stock, when it needs you (a pause or the final click),
+and a happy system chime when an order is placed. Click **Test sound** to hear it. Untick the box if you’re
+not about all that jazz.
 
 ### Google Alerts: hear about a drop the moment it's announced
 
-Google Alerts emails you (or feeds you) new web results for a search, which is handy for spotting
+Google Alerts emails you (or RSS feeds you) new web results for a search, which is handy for spotting
 restock or release-date news.
 
 1. Ro-Bought suggests a search in **Search to watch**, based on your product name. You can edit it.
@@ -321,7 +327,7 @@ notifies you two minutes before the drop.
 - Ro-Bought ignores "See All Buying Options" listings from other sellers. These are often resellers
   at higher prices.
 
-### Nintendo US store (nintendo.com/us/store)
+### Nintendo US or Canadian store (nintendo.com/us/store)
 
 - **Create a Nintendo Account**, save your address and payment method in it, and **sign in** before
   the drop.
@@ -384,13 +390,13 @@ The tab was closed or reloaded, or your computer slept. Reload the store tab, or
 Read the message in the Ro-Bought panel or the popup; it always says what to do. The **Activity** log
 in Options shows the full story.
 
-**It can't find a button on my store.**
+**It can't find a button on a store.**
 Use [Teach buttons](#teach-buttons). If it still struggles, use **Copy page report** and share it.
 
 **"Your cart already has items".**
 Remove them before the drop (on Amazon, use **Save for later**).
 
-**I don't hear any sound.**
+**You don't hear any sound.**
 Check the box in **Notifications**, click **Test sound**, and make sure your computer isn't muted.
 
 **The Google Alerts feed shows an error.**
@@ -417,4 +423,4 @@ How Ro-Bought is built, how to run its tests, and the mock store used for rehear
 
 ## License
 
-Free and open source under the GPL-3.0 licence. See [LICENSE](LICENSE).
+Free and open source under the GPL-3.0 licence. See [LICENSE](LICENSE). 

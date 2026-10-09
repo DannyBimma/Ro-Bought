@@ -95,7 +95,7 @@ function mutateRunState(mutator) {
     await chrome.storage.local.set({ [STORAGE_KEYS.RUN_STATE]: next });
     return next;
   });
-  stateQueue = task.catch(() => {});
+  stateQueue = task.catch(() => { });
   return task;
 }
 
@@ -167,7 +167,7 @@ function notify(id, title, message, requireInteraction = false) {
 }
 
 function clearNotification(id) {
-  return chrome.notifications.clear(`robought-${id}`).catch(() => {});
+  return chrome.notifications.clear(`robought-${id}`).catch(() => { });
 }
 
 /** Notify at most once per `cooldownMs` for a given key (tracked in session storage). */
@@ -188,7 +188,7 @@ chrome.notifications.onClicked.addListener(async (notificationId) => {
     return;
   }
   const state = await readRunState();
-  if (state.tabId != null) await focusTab(state.tabId).catch(() => {});
+  if (state.tabId != null) await focusTab(state.tabId).catch(() => { });
 });
 
 // ---------------------------------------------------------------------------
@@ -347,7 +347,7 @@ async function clearLog() {
 let scriptSyncQueue = Promise.resolve();
 function syncContentScripts() {
   const task = scriptSyncQueue.then(syncContentScriptsNow);
-  scriptSyncQueue = task.catch(() => {});
+  scriptSyncQueue = task.catch(() => { });
   return task;
 }
 
@@ -394,13 +394,13 @@ async function openRetailerTab(productUrl) {
     tab = await chrome.tabs.create({ url: productUrl, active: true });
   }
   // Stop Memory Saver from discarding the tab mid-run.
-  await chrome.tabs.update(tab.id, { autoDiscardable: false }).catch(() => {});
+  await chrome.tabs.update(tab.id, { autoDiscardable: false }).catch(() => { });
   return tab;
 }
 
 function releaseTab(tabId) {
   // Hand the tab back to Memory Saver. Ignore failures: the tab may already be closed.
-  if (tabId != null) chrome.tabs.update(tabId, { autoDiscardable: true }).catch(() => {});
+  if (tabId != null) chrome.tabs.update(tabId, { autoDiscardable: true }).catch(() => { });
 }
 
 async function activeTabTicketReason() {
@@ -571,7 +571,7 @@ async function pauseRun(guard, { focus = true } = {}) {
   notify('paused', 'Ro-Bought paused — your turn', `${guard.label}. ${PAUSE_HINTS[guard.kind] || ''}`, true);
   playSound('attention');
   if (focus && state.tabId != null && guard.kind !== 'tab_closed') {
-    focusTab(state.tabId).catch(() => {});
+    focusTab(state.tabId).catch(() => { });
   }
   return { ok: true };
 }
@@ -786,7 +786,7 @@ async function onAvailable(msg, sender) {
   if (!started) return { ok: false, error: 'Not watching.' };
   notify('available', 'In stock — Ro-Bought is checking out', 'Watch the retailer tab. Ro-Bought will hand over if it needs you.');
   playSound('attention');
-  if (next.tabId != null) focusTab(next.tabId).catch(() => {});
+  if (next.tabId != null) focusTab(next.tabId).catch(() => { });
   return { ok: true };
 }
 
@@ -869,7 +869,7 @@ async function onCheckoutHandoff(msg, sender) {
   if (!handedOff) return { ok: false, error: 'Not checking out.' };
   notify('handoff', ready ? 'Ready — your click' : 'Ro-Bought: your turn', next.message, true);
   playSound('attention');
-  if (next.tabId != null) focusTab(next.tabId).catch(() => {});
+  if (next.tabId != null) focusTab(next.tabId).catch(() => { });
   return { ok: true };
 }
 
@@ -1048,7 +1048,7 @@ async function prewarn() {
   else if (quiet) message = "Ro-Bought hasn't heard from the retailer tab recently. Reload the tab now.";
   notify('prewarn', `Drop in ${PREWARN_MINUTES} minutes`, message, true);
   playSound('attention');
-  if (s.tabId != null) focusTab(s.tabId).catch(() => {});
+  if (s.tabId != null) focusTab(s.tabId).catch(() => { });
 }
 
 function sanitizeGuard(g) {
